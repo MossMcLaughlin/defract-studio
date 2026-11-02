@@ -14,191 +14,18 @@ struct EditorApp: App {
     }
 }
 
-@MainActor
-final class EditorModel: ObservableObject {
-    @Published var items: [EditHistory] = []
-    @Published var draft: EditRecipe?
-    @Published var image: NSImage?
-    @Published var player: AVPlayer?
-    @Published var error: String?
-    @Published var busy = false
-    @Published var duration = 0.0
-    @Published var seconds = 0.0
-    @Published var showingOriginal = false
-
-    private let store: ProjectStore
-    private var renderingRevision = 0
-    private var gestureStart: EditRecipe?
-    private var previewTask: Task<Void, Never>?
-
-    init() {
-        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        store = ProjectStore(directory: support.appendingPathComponent("PhotoVideoEditor/Projects"))
-        do {
-            items = try store.loadAll().sorted { $0.current.lastModified > $1.current.lastModified }
-            let remembered = UserDefaults.standard.string(forKey: "selectedMediaID")
-            let selected = items.first { $0.current.id.uuidString == remembered } ?? items.first
-            if let selected { select(selected.current.id) }
-        } catch { self.error = "Saved edits could not be loaded: \(error.localizedDescription)" }
-    }
-
-    var selectedID: UUID? { draft?.id }
-    var kind: MediaKind? { draft?.kind }
-    var canUndo: Bool { items.first { $0.current.id == selectedID }?.undoStack.isEmpty == false }
-    var canRedo: Bool { items.first { $0.current.id == selectedID }?.redoStack.isEmpty == false }
-
-    func importFiles() {
-        let panel = NSOpenPanel()
-        panel.allowsMultipleSelection = true
-        panel.allowedContentTypes = [.jpeg, .png, .heic, .mpeg4Movie, .quickTimeMovie]
-        guard panel.runModal() == .OK else { return }
-        for url in panel.urls {
-            if let existing = items.first(where: { $0.current.sourcePath == url.path }) {
-                select(existing.current.id)
-            } else {
-                let kind: MediaKind = ["mp4", "mov"].contains(url.pathExtension.lowercased()) ? .video : .photo
-                let history = EditHistory(EditRecipe(sourcePath: url.path, kind: kind))
-                do {
-                    try store.save(history)
-                    items.append(history)
-                    select(history.current.id)
-                } catch { self.error = "Could not save the new edit session: \(error.localizedDescription)" }
-            }
-        }
-    }
-
-    func select(_ id: UUID) {
-        guard let history = items.first(where: { $0.current.id == id }) else { return }
-        draft = history.current
-        UserDefaults.standard.set(id.uuidString, forKey: "selectedMediaID")
-        refresh()
-    }
-
-    func beginGesture() { gestureStart = draft }
-    func endGesture() {
-        if gestureStart != nil { commit() }
-        gestureStart = nil
-    }
-
-    func change(_ update: (inout EditRecipe) -> Void) {
-        guard var recipe = draft else { return }
-        update(&recipe)
-        draft = recipe
-        refresh()
-        if gestureStart == nil { commit() }
-    }
-
-    private func commit() {
-        guard let draft, let index = items.firstIndex(where: { $0.current.id == draft.id }) else { return }
-        items[index].apply { $0 = draft }
-        self.draft = items[index].current
-        do { try store.save(items[index]) }
-        catch { self.error = "Autosave failed; edits remain in memory. \(error.localizedDescription)" }
-    }
-
-    func undo() {
-        guard let id = selectedID, let index = items.firstIndex(where: { $0.current.id == id }) else { return }
-        items[index].undo()
-        draft = items[index].current
-        persist(index)
-        refresh()
-    }
-
-    func redo() {
-        guard let id = selectedID, let index = items.firstIndex(where: { $0.current.id == id }) else { return }
-        items[index].redo()
-        draft = items[index].current
-        persist(index)
-        refresh()
-    }
-
-    private func persist(_ index: Int) {
-        do { try store.save(items[index]) }
-        catch { self.error = "Autosave failed; edits remain in memory. \(error.localizedDescription)" }
-    }
-
-    func refresh() {
-        guard let recipe = draft else { return }
-        let url = URL(fileURLWithPath: recipe.sourcePath)
-        guard FileManager.default.fileExists(atPath: url.path) else {
-            image = nil
-            player = nil
-            error = "Source is missing: \(url.lastPathComponent). Relink it to continue."
-            return
-        }
-        let adjustment = showingOriginal ? AdjustmentVector() : recipe.color.effective
-        renderingRevision += 1
-        let revision = renderingRevision
-        if recipe.kind == .photo {
-            player = nil
-            previewTask?.cancel()
-            let geometry = recipe.geometry
-            previewTask = Task.detached(priority: .userInitiated) {
-                do {
-                    let cg = try MediaIO.photoPreviewCGImage(url: url, adjustment: adjustment, geometry: geometry)
-                    await MainActor.run {
-                        guard revision == self.renderingRevision else { return }
-                        self.image = NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
-                    }
-                } catch {
-                    await MainActor.run { if revision == self.renderingRevision { self.error = error.localizedDescription } }
-                }
-            }
-        } else {
-            image = nil
-            let wasPlaying = player?.rate ?? 0 > 0
-            let position = player?.currentTime() ?? .zero
-            Task {
-                do {
-                    let item = try await MediaIO.videoItem(url: url, adjustment: adjustment)
-                    let assetDuration = try await AVURLAsset(url: url).load(.duration)
-                    guard revision == renderingRevision else { return }
-                    let next = AVPlayer(playerItem: item)
-                    player = next
-                    duration = assetDuration.seconds.isFinite ? assetDuration.seconds : 0
-                    await next.seek(to: position)
-                    if wasPlaying { next.play() }
-                } catch { if revision == renderingRevision { self.error = error.localizedDescription } }
-            }
-        }
-    }
-
-    func export() {
-        guard let recipe = draft else { return }
-        let source = URL(fileURLWithPath: recipe.sourcePath)
-        let panel = NSSavePanel()
-        panel.nameFieldStringValue = source.deletingPathExtension().lastPathComponent + "-edited." + (recipe.kind == .video ? "mp4" : "jpg")
-        guard panel.runModal() == .OK, let destination = panel.url else { return }
-        busy = true
-        Task {
-            do {
-                if recipe.kind == .video {
-                    try await MediaIO.exportVideo(url: source, to: destination, adjustment: recipe.color.effective)
-                } else {
-                    try MediaIO.exportPhoto(url: source, to: destination, adjustment: recipe.color.effective, geometry: recipe.geometry)
-                }
-            } catch { self.error = "Export failed: \(error.localizedDescription)" }
-            busy = false
-        }
-    }
-
-    func relink() {
-        guard let id = selectedID else { return }
-        let panel = NSOpenPanel()
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        change { $0.sourcePath = url.path }
-        select(id)
-    }
-}
 
 struct EditorView: View {
     @StateObject private var model = EditorModel()
     @AppStorage("sidebarVisible") private var sidebarVisible = true
     @AppStorage("inspectorMode") private var inspectorMode = "Advanced"
+    @AppStorage("inspectorTab") private var inspectorTab = "Global"
     @AppStorage("shownManualHelp") private var shownManualHelp = false
     @State private var selectedBand = 0
     @State private var zoom = 1.0
     @State private var confirmReset = false
+    @State private var painting = false
+    @State private var hoverLocation: CGPoint?
     private let bands = ["Red", "Orange", "Yellow", "Green", "Aqua", "Blue", "Purple", "Magenta"]
 
     var body: some View {
@@ -219,6 +46,7 @@ struct EditorView: View {
         .confirmationDialog("Reset all global color edits?", isPresented: $confirmReset) {
             Button("Reset All", role: .destructive) { model.change { $0.color = ColorState() } }
         }
+        .onAppear { model.maskPanelActive = inspectorTab == "Masks"; model.refresh() }
     }
 
     private var toolbar: some View {
@@ -228,6 +56,8 @@ struct EditorView: View {
             Button("Undo", action: model.undo).disabled(!model.canUndo).keyboardShortcut("z", modifiers: .command)
             Button("Redo", action: model.redo).disabled(!model.canRedo).keyboardShortcut("z", modifiers: [.command, .shift])
             Button(model.showingOriginal ? "Show Edited" : "Before/After") { model.showingOriginal.toggle(); model.refresh() }
+                .disabled(model.draft == nil)
+            Button(model.cropEditing ? "Done Cropping" : "Crop & Rotate") { zoom = 1; model.toggleCropEditing() }
                 .disabled(model.draft == nil)
             Spacer()
             Text("Photo & Video Editor").font(.headline).foregroundStyle(.secondary)
@@ -278,12 +108,47 @@ struct EditorView: View {
             Spacer(minLength: 0)
             if let player = model.player {
                 PlayerView(player: player).frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .overlay {
+                        if model.cropEditing { CropOverlay(model: model) }
+                        else if inspectorTab == "Masks", model.selectedMask?.kind == .linear || model.selectedMask?.kind == .radial {
+                            GradientOverlay(model: model)
+                        }
+                    }
             } else if let image = model.image {
                 GeometryReader { geometry in
-                    Image(nsImage: image).resizable().scaledToFit()
-                        .frame(width: geometry.size.width, height: geometry.size.height)
-                        .scaleEffect(zoom)
-                        .clipped()
+                    ZStack {
+                        Image(nsImage: image).resizable().scaledToFit()
+                            .frame(width: geometry.size.width, height: geometry.size.height)
+                            .scaleEffect(zoom)
+                            .clipped()
+                        if model.cropEditing { CropOverlay(model: model) }
+                        else if inspectorTab == "Masks", model.selectedMask?.kind == .linear || model.selectedMask?.kind == .radial {
+                            GradientOverlay(model: model)
+                        }
+                        else if inspectorTab == "Masks", model.kind == .photo,
+                           model.selectedMask?.kind == .brush || model.selectedMask?.kind == .subject {
+                            Color.clear.contentShape(Rectangle())
+                                .onContinuousHover { phase in
+                                    switch phase {
+                                    case .active(let location): hoverLocation = location
+                                    case .ended: hoverLocation = nil
+                                    }
+                                }
+                                .gesture(DragGesture(minimumDistance: 0)
+                                    .onChanged { value in
+                                        guard let point = brushPoint(value.location, viewSize: geometry.size, imageSize: image.size) else { return }
+                                        if !painting { model.beginStroke(at: point); painting = true }
+                                        else { model.extendStroke(to: point) }
+                                    }
+                                    .onEnded { _ in if painting { model.endStroke(); painting = false } })
+                            if let hoverLocation {
+                                Circle().stroke(.white, lineWidth: 1.5)
+                                    .frame(width: brushDiameter(viewSize: geometry.size, imageSize: image.size), height: brushDiameter(viewSize: geometry.size, imageSize: image.size))
+                                    .position(hoverLocation)
+                                    .allowsHitTesting(false)
+                            }
+                        }
+                    }
                 }
             } else if model.draft == nil {
                 Button("Open Photos or Videos", action: model.importFiles)
@@ -304,11 +169,23 @@ struct EditorView: View {
     }
 
     private var videoControls: some View {
-        HStack {
-            Button("Play") { model.player?.play() }
-            Button("Pause") { model.player?.pause() }
-            Slider(value: Binding(get: { model.seconds }, set: { model.seconds = $0; model.player?.seek(to: CMTime(seconds: $0, preferredTimescale: 600)) }), in: 0...max(model.duration, 0.01))
-            Text(String(format: "%.1f / %.1f", model.seconds, model.duration)).font(.caption.monospacedDigit())
+        VStack(spacing: 5) {
+            HStack {
+                Button("Play") { model.player?.play() }
+                Button("Pause") { model.player?.pause() }
+                Slider(value: Binding(get: { model.seconds }, set: { model.seconds = $0; model.player?.seek(to: CMTime(seconds: $0, preferredTimescale: 600)) }), in: 0...max(model.duration, 0.01))
+                Text(String(format: "%.1f / %.1f", model.seconds, model.duration)).font(.caption.monospacedDigit())
+            }
+            HStack {
+                Text("In \(model.draft?.videoTrim.startSeconds ?? 0, specifier: "%.2f")")
+                Slider(value: Binding(get: { model.draft?.videoTrim.startSeconds ?? 0 }, set: { value in
+                    model.change { $0.videoTrim.startSeconds = min(value, ($0.videoTrim.endSeconds ?? model.duration) - 0.05) }
+                }), in: 0...max(0.01, (model.draft?.videoTrim.endSeconds ?? model.duration) - 0.05), onEditingChanged: { editing in editing ? model.beginGesture() : model.endGesture() })
+                Text("Out \(model.draft?.videoTrim.endSeconds ?? model.duration, specifier: "%.2f")")
+                Slider(value: Binding(get: { model.draft?.videoTrim.endSeconds ?? model.duration }, set: { value in
+                    model.change { $0.videoTrim.endSeconds = max(value, $0.videoTrim.startSeconds + 0.05) }
+                }), in: min(model.duration, (model.draft?.videoTrim.startSeconds ?? 0) + 0.05)...max(model.duration, 0.05), onEditingChanged: { editing in editing ? model.beginGesture() : model.endGesture() })
+            }.font(.caption)
         }
         .onReceive(Timer.publish(every: 0.2, on: .main, in: .common).autoconnect()) { _ in
             if let seconds = model.player?.currentTime().seconds, seconds.isFinite { model.seconds = seconds }
@@ -317,18 +194,23 @@ struct EditorView: View {
 
     private var inspector: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Global").font(.title3.bold())
-            Picker("Controls", selection: $inspectorMode) {
-                Text("Easy").tag("Easy")
-                Text("Advanced").tag("Advanced")
+            Picker("Inspector", selection: $inspectorTab) {
+                Text("Global").tag("Global")
+                Text("Masks").tag("Masks")
             }.pickerStyle(.segmented)
+            .onChange(of: inspectorTab) { _, mode in model.maskPanelActive = mode == "Masks"; model.refresh() }
             if model.draft == nil { Text("Import a file to begin.").foregroundStyle(.secondary) }
+            else if inspectorTab == "Masks" { MaskInspector(model: model) }
             else {
+                Picker("Controls", selection: $inspectorMode) {
+                    Text("Easy").tag("Easy")
+                    Text("Advanced").tag("Advanced")
+                }.pickerStyle(.segmented)
                 ScrollView {
                     VStack(alignment: .leading, spacing: 14) {
                         if inspectorMode == "Easy" { easyInspector }
                         else { advancedInspector }
-                        if model.kind == .photo { cropInspector }
+                        if model.kind != nil { cropInspector }
                         Divider()
                         HStack {
                             Button("Reset Easy") { model.change { $0.color.resetEasy() } }
@@ -341,6 +223,41 @@ struct EditorView: View {
         }
         .padding(14)
         .background(Color(red: 0.13, green: 0.15, blue: 0.15))
+    }
+
+    private func brushPoint(_ location: CGPoint, viewSize: CGSize, imageSize: NSSize) -> NormalizedPoint? {
+        guard let recipe = model.draft, model.sourceSize.width > 0, model.sourceSize.height > 0,
+              imageSize.width > 0, imageSize.height > 0 else { return nil }
+        let scale = min(viewSize.width / imageSize.width, viewSize.height / imageSize.height) * zoom
+        let width = imageSize.width * scale
+        let height = imageSize.height * scale
+        let u = (location.x - (viewSize.width - width) / 2) / width
+        let v = (location.y - (viewSize.height - height) / 2) / height
+        guard (0...1).contains(u), (0...1).contains(v) else { return nil }
+        let geometrySize = recipe.geometry.outputSize(for: model.sourceSize)
+        let outputPoint = recipe.outputFrame?.inputPoint(fromOutputNormalized: NormalizedPoint(u, v), inputSize: geometrySize)
+            ?? NormalizedPoint(u, v)
+        guard (0...1).contains(outputPoint.x), (0...1).contains(outputPoint.y) else { return nil }
+        let point = recipe.geometry.sourcePoint(fromOutputNormalized: outputPoint, sourceSize: model.sourceSize)
+        guard (0...1).contains(point.x), (0...1).contains(point.y) else { return nil }
+        return point
+    }
+
+    private func brushDiameter(viewSize: CGSize, imageSize: NSSize) -> CGFloat {
+        guard let recipe = model.draft, model.sourceSize.width > 0, imageSize.width > 0 else { return 10 }
+        let output = recipe.geometry.outputSize(for: model.sourceSize)
+        let center = NormalizedPoint(0.5, 0.5)
+        let edge = NormalizedPoint(0.5 + model.brushSize * min(model.sourceSize.width, model.sourceSize.height) / (2 * model.sourceSize.width), 0.5)
+        var displayedCenter = recipe.geometry.outputPoint(fromSourceNormalized: center, sourceSize: model.sourceSize)
+        var displayedEdge = recipe.geometry.outputPoint(fromSourceNormalized: edge, sourceSize: model.sourceSize)
+        if let frame = recipe.outputFrame {
+            displayedCenter = frame.outputPoint(fromInputNormalized: displayedCenter, inputSize: output)
+            displayedEdge = frame.outputPoint(fromInputNormalized: displayedEdge, inputSize: output)
+        }
+        let scale = min(viewSize.width / imageSize.width, viewSize.height / imageSize.height) * zoom
+        let dx = (displayedEdge.x - displayedCenter.x) * imageSize.width
+        let dy = (displayedEdge.y - displayedCenter.y) * imageSize.height
+        return max(4, 2 * hypot(dx, dy) * scale)
     }
 
     private var easyInspector: some View {
@@ -361,11 +278,26 @@ struct EditorView: View {
     private var cropInspector: some View {
         VStack(alignment: .leading, spacing: 8) {
             Divider()
-            Text("Crop").font(.headline)
+            Text("Crop & Rotate").font(.headline)
             Picker("Aspect", selection: Binding(get: { model.draft?.geometry.aspect ?? .original }, set: { value in
                 model.change { $0.geometry.aspect = value }
             })) {
                 ForEach(CropAspect.allCases, id: \.self) { aspect in Text(aspect.rawValue).tag(aspect) }
+            }
+            if model.draft?.geometry.aspect == .free {
+                Text("Crop width")
+                Slider(value: Binding(get: { model.draft?.geometry.freeWidth ?? 1 }, set: { value in
+                    model.change { $0.geometry.freeWidth = value }
+                }), in: 0.1...1, onEditingChanged: { editing in editing ? model.beginGesture() : model.endGesture() })
+                Text("Crop height")
+                Slider(value: Binding(get: { model.draft?.geometry.freeHeight ?? 1 }, set: { value in
+                    model.change { $0.geometry.freeHeight = value }
+                }), in: 0.1...1, onEditingChanged: { editing in editing ? model.beginGesture() : model.endGesture() })
+            } else if model.draft?.geometry.aspect != .original {
+                Text("Crop size")
+                Slider(value: Binding(get: { model.draft?.geometry.cropScale ?? 1 }, set: { value in
+                    model.change { $0.geometry.cropScale = value }
+                }), in: 0.1...1, onEditingChanged: { editing in editing ? model.beginGesture() : model.endGesture() })
             }
             if model.draft?.geometry.aspect != .original {
                 Text("Horizontal position")
@@ -377,6 +309,14 @@ struct EditorView: View {
                     model.change { $0.geometry.centerY = value }
                 }), in: 0...1, onEditingChanged: { editing in editing ? model.beginGesture() : model.endGesture() })
             }
+            HStack {
+                Button("Rotate Left") { model.change { $0.geometry.rotateQuarterTurns -= 1 } }
+                Button("Rotate Right") { model.change { $0.geometry.rotateQuarterTurns += 1 } }
+            }
+            Text("Straighten \(model.draft?.geometry.straightenDegrees ?? 0, specifier: "%.1f")°")
+            Slider(value: Binding(get: { model.draft?.geometry.straightenDegrees ?? 0 }, set: { value in
+                model.change { $0.geometry.straightenDegrees = value }
+            }), in: -20...20, onEditingChanged: { editing in editing ? model.beginGesture() : model.endGesture() })
         }
     }
 

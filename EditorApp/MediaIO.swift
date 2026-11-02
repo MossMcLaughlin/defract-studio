@@ -20,12 +20,12 @@ enum MediaIO {
         return image
     }
 
-    static func photoPreview(url: URL, adjustment: AdjustmentVector, geometry: Geometry = Geometry()) throws -> NSImage {
-        let cg = try photoPreviewCGImage(url: url, adjustment: adjustment, geometry: geometry)
+    static func photoPreview(url: URL, recipe: EditRecipe, selectedMaskID: UUID? = nil) throws -> NSImage {
+        let cg = try photoPreviewCGImage(url: url, recipe: recipe, selectedMaskID: selectedMaskID)
         return NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
     }
 
-    static func photoPreviewCGImage(url: URL, adjustment: AdjustmentVector, geometry: Geometry = Geometry()) throws -> CGImage {
+    static func photoPreviewCGImage(url: URL, recipe: EditRecipe, selectedMaskID: UUID? = nil) throws -> CGImage {
         let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate)?.timeIntervalSince1970 ?? 0
         let key = "\(url.path):\(modified)" as NSString
         let sourceImage: CIImage
@@ -43,15 +43,25 @@ enum MediaIO {
             sourceImage = CIImage(cgImage: thumbnail)
             thumbnailCache.setObject(sourceImage, forKey: key)
         }
-        let rendered = CoreRenderer.applyGeometry(CoreRenderer.render(sourceImage, adjustment: adjustment), geometry: geometry)
+        let graded = CoreRenderer.render(sourceImage, color: recipe.color, masks: recipe.masks)
+        let cropped = CoreRenderer.applyGeometry(overlay(graded, recipe: recipe, selectedMaskID: selectedMaskID), geometry: recipe.geometry)
+        var previewFrame = recipe.outputFrame
+        if var frame = previewFrame, max(frame.width, frame.height) > 1800 {
+            let scale = 1800.0 / Double(max(frame.width, frame.height))
+            frame.width = max(1, Int((Double(frame.width) * scale).rounded()))
+            frame.height = max(1, Int((Double(frame.height) * scale).rounded()))
+            previewFrame = frame
+        }
+        let rendered = CoreRenderer.applyOutputFrame(cropped, frame: previewFrame)
         guard let cg = context.createCGImage(rendered, from: rendered.extent) else {
             throw NSError(domain: "Editor", code: 2, userInfo: [NSLocalizedDescriptionKey: "Image could not be rendered."])
         }
         return cg
     }
 
-    static func exportPhoto(url: URL, to destination: URL, adjustment: AdjustmentVector, geometry: Geometry = Geometry()) throws {
-        let rendered = CoreRenderer.applyGeometry(CoreRenderer.render(try photoImage(url: url), adjustment: adjustment), geometry: geometry)
+    static func exportPhoto(url: URL, to destination: URL, recipe: EditRecipe) throws {
+        let cropped = CoreRenderer.applyGeometry(CoreRenderer.render(try photoImage(url: url), color: recipe.color, masks: recipe.masks), geometry: recipe.geometry)
+        let rendered = CoreRenderer.applyOutputFrame(cropped, frame: recipe.outputFrame)
         let temporary = destination.deletingLastPathComponent().appendingPathComponent(UUID().uuidString + ".jpg")
         defer { try? FileManager.default.removeItem(at: temporary) }
         guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
@@ -66,32 +76,59 @@ enum MediaIO {
         try FileManager.default.moveItem(at: temporary, to: destination)
     }
 
-    static func videoComposition(asset: AVURLAsset, adjustment: AdjustmentVector) async throws -> AVVideoComposition {
+    private static func overlay(_ image: CIImage, recipe: EditRecipe, selectedMaskID: UUID?) -> CIImage {
+        guard let selectedMaskID, let mask = recipe.masks.first(where: { $0.id == selectedMaskID }) else { return image }
+        let alpha = MaskRenderer.alphaImage(for: mask, extent: image.extent)
+        let tint = CIImage(color: CIColor(red: 0.17, green: 0.5, blue: 0.9, alpha: 1)).cropped(to: image.extent)
+        let tinted = tint.applyingFilter("CIBlendWithMask", parameters: [kCIInputBackgroundImageKey: image, "inputMaskImage": alpha])
+        return tinted.applyingFilter("CIDissolveTransition", parameters: [kCIInputTargetImageKey: image, kCIInputTimeKey: 0.65])
+    }
+
+    static func videoComposition(asset: AVURLAsset, recipe: EditRecipe, selectedMaskID: UUID? = nil) async throws -> AVVideoComposition {
         try await withCheckedThrowingContinuation { continuation in
-            AVVideoComposition.videoComposition(with: asset, applyingCIFiltersWithHandler: { request in
-                request.finish(with: CoreRenderer.render(request.sourceImage, adjustment: adjustment), context: context)
+            AVMutableVideoComposition.videoComposition(with: asset, applyingCIFiltersWithHandler: { request in
+                let graded = CoreRenderer.render(request.sourceImage, color: recipe.color, masks: recipe.masks)
+                let framed = CoreRenderer.applyGeometry(overlay(graded, recipe: recipe, selectedMaskID: selectedMaskID), geometry: recipe.geometry)
+                request.finish(with: CoreRenderer.applyOutputFrame(framed, frame: recipe.outputFrame), context: context)
             }, completionHandler: { composition, error in
-                if let composition { continuation.resume(returning: composition) }
+                if let composition {
+                    let output = recipe.outputFrame.map { CGSize(width: $0.width, height: $0.height) }
+                        ?? recipe.geometry.outputSize(for: composition.renderSize)
+                    composition.renderSize = CGSize(width: 2 * floor(output.width / 2), height: 2 * floor(output.height / 2))
+                    continuation.resume(returning: composition)
+                }
                 else { continuation.resume(throwing: error ?? NSError(domain: "Editor", code: 5)) }
             })
         }
     }
 
-    @MainActor static func videoItem(url: URL, adjustment: AdjustmentVector) async throws -> AVPlayerItem {
+    @MainActor static func videoItem(url: URL, recipe: EditRecipe, selectedMaskID: UUID? = nil) async throws -> AVPlayerItem {
         let asset = AVURLAsset(url: url)
         let item = AVPlayerItem(asset: asset)
-        item.videoComposition = try await videoComposition(asset: asset, adjustment: adjustment)
+        item.videoComposition = try await videoComposition(asset: asset, recipe: recipe, selectedMaskID: selectedMaskID)
+        if let end = recipe.videoTrim.endSeconds { item.forwardPlaybackEndTime = CMTime(seconds: end, preferredTimescale: 600) }
         return item
     }
 
-    static func exportVideo(url: URL, to destination: URL, adjustment: AdjustmentVector) async throws {
+    static func exportVideo(url: URL, to destination: URL, recipe: EditRecipe) async throws {
         let asset = AVURLAsset(url: url)
         let temporary = destination.deletingLastPathComponent().appendingPathComponent(UUID().uuidString + ".mp4")
         defer { try? FileManager.default.removeItem(at: temporary) }
-        guard let session = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetHighestQuality) else {
+        let preset = recipe.videoCodec == .hevc ? AVAssetExportPresetHEVCHighestQuality : AVAssetExportPresetHighestQuality
+        guard let session = AVAssetExportSession(asset: asset, presetName: preset) else {
             throw NSError(domain: "Editor", code: 6, userInfo: [NSLocalizedDescriptionKey: "Video export is unavailable."])
         }
-        session.videoComposition = try await videoComposition(asset: asset, adjustment: adjustment)
+        guard session.supportedFileTypes.contains(.mp4) else {
+            throw NSError(domain: "Editor", code: 8, userInfo: [NSLocalizedDescriptionKey: "The selected codec cannot export MP4 on this Mac."])
+        }
+        session.videoComposition = try await videoComposition(asset: asset, recipe: recipe)
+        let assetDuration = try await asset.load(.duration).seconds
+        let start = max(0, min(recipe.videoTrim.startSeconds, assetDuration))
+        let end = max(0, min(recipe.videoTrim.endSeconds ?? assetDuration, assetDuration))
+        guard end - start > 0.04 else {
+            throw NSError(domain: "Editor", code: 7, userInfo: [NSLocalizedDescriptionKey: "Trim must leave at least one video frame."])
+        }
+        session.timeRange = CMTimeRange(start: CMTime(seconds: start, preferredTimescale: 600), duration: CMTime(seconds: end - start, preferredTimescale: 600))
         try await session.export(to: temporary, as: .mp4)
         try FileManager.default.moveItem(at: temporary, to: destination)
     }

@@ -132,6 +132,14 @@ public enum EasyMapping {
 
 public enum MediaKind: String, Codable, Sendable { case photo, video }
 
+public struct VideoTrim: Codable, Equatable, Sendable {
+    public var startSeconds = 0.0
+    public var endSeconds: Double?
+    public init() {}
+}
+
+public enum VideoCodec: String, Codable, Sendable { case h264, hevc }
+
 public struct EditRecipe: Codable, Equatable, Sendable {
     public var schemaVersion = 1
     public var id = UUID()
@@ -139,6 +147,10 @@ public struct EditRecipe: Codable, Equatable, Sendable {
     public var kind: MediaKind
     public var color = ColorState()
     public var geometry = Geometry()
+    public var masks: [EditMask] = []
+    public var videoTrim = VideoTrim()
+    public var videoCodec: VideoCodec = .h264
+    public var outputFrame: OutputFrame?
     public var lastModified = Date()
 
     public init(sourcePath: String, kind: MediaKind) {

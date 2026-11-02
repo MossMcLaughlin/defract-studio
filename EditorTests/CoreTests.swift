@@ -1,5 +1,6 @@
 import XCTest
 import CoreImage
+import AppKit
 import EditorCore
 
 final class CoreTests: XCTestCase {
@@ -110,6 +111,100 @@ final class CoreTests: XCTestCase {
             let changed = ColorMath.applyLinearRGB(sample.0, sample.1, sample.2, adjustment: adjustment)
             let difference = abs(changed.0 - sample.0) + abs(changed.1 - sample.1) + abs(changed.2 - sample.2)
             XCTAssertGreaterThan(difference, 0.0001, "\(parameter) did not change its test color")
+        }
+    }
+
+    func testMaskMathBrushPersistenceAndLocalBlend() throws {
+        var mask = EditMask(name: "Subject", kind: .brush)
+        mask.strokes = [
+            BrushStroke(operation: .add, points: [NormalizedPoint(0.5, 0.5)], size: 0.4, feather: 0.5),
+            BrushStroke(operation: .erase, points: [NormalizedPoint(0.5, 0.5)], size: 0.1, feather: 0.5)
+        ]
+        XCTAssertEqual(MaskMath.alpha(at: NormalizedPoint(0.5, 0.5), mask: mask), 0, accuracy: 0.001)
+        XCTAssertGreaterThan(MaskMath.alpha(at: NormalizedPoint(0.6, 0.5), mask: mask), 0.5)
+        let restored = try JSONDecoder().decode(EditMask.self, from: JSONEncoder().encode(mask))
+        XCTAssertEqual(restored, mask)
+        var radial = EditMask(name: "Center", kind: .radial)
+        radial.adjustment[.exposure] = 1
+        let source = CIImage(color: CIColor(red: 0.2, green: 0.2, blue: 0.2)).cropped(to: CGRect(x: 0, y: 0, width: 64, height: 64))
+        let rendered = CoreRenderer.render(source, color: ColorState(), masks: [radial])
+        let context = CIContext()
+        let cg = try XCTUnwrap(context.createCGImage(rendered, from: source.extent))
+        let bitmap = NSBitmapImageRep(cgImage: cg)
+        let center = try XCTUnwrap(bitmap.colorAt(x: 32, y: 32))
+        let corner = try XCTUnwrap(bitmap.colorAt(x: 0, y: 0))
+        XCTAssertGreaterThan(center.redComponent, corner.redComponent + 0.05)
+        XCTAssertEqual(corner.redComponent, 0.2, accuracy: 0.03)
+    }
+
+    func testRotateAndStraightenGeometry() {
+        var geometry = Geometry()
+        geometry.rotateQuarterTurns = 1
+        XCTAssertEqual(geometry.outputSize(for: CGSize(width: 100, height: 200)), CGSize(width: 200, height: 100))
+        let source = CIImage(color: .white).cropped(to: CGRect(x: 0, y: 0, width: 100, height: 200))
+        let rotated = CoreRenderer.applyGeometry(source, geometry: geometry)
+        XCTAssertEqual(rotated.extent.size.width, 200, accuracy: 0.001)
+        XCTAssertEqual(rotated.extent.size.height, 100, accuracy: 0.001)
+        geometry.rotateQuarterTurns = 0
+        geometry.straightenDegrees = 10
+        let straightened = CoreRenderer.applyGeometry(source, geometry: geometry)
+        XCTAssertLessThan(straightened.extent.width, 100)
+        XCTAssertLessThan(straightened.extent.height, 200)
+        XCTAssertEqual(straightened.extent.width / straightened.extent.height, 0.5, accuracy: 0.001)
+    }
+
+    func testFreeCropAndLinearMaskInversion() {
+        var geometry = Geometry()
+        geometry.aspect = .free
+        geometry.freeWidth = 0.5
+        geometry.freeHeight = 0.75
+        geometry.centerX = 1
+        let crop = geometry.cropRect(in: CGRect(x: 0, y: 0, width: 1000, height: 800))
+        XCTAssertEqual(crop, CGRect(x: 500, y: 100, width: 500, height: 600))
+        var mask = EditMask(name: "Sky", kind: .linear)
+        XCTAssertLessThan(MaskMath.alpha(at: NormalizedPoint(0.5, 0.1), mask: mask), 0.01)
+        XCTAssertGreaterThan(MaskMath.alpha(at: NormalizedPoint(0.5, 0.9), mask: mask), 0.99)
+        mask.inverted = true
+        XCTAssertGreaterThan(MaskMath.alpha(at: NormalizedPoint(0.5, 0.1), mask: mask), 0.99)
+    }
+
+    func testSourcePointMappingSurvivesCropAndRotation() {
+        let size = CGSize(width: 1536, height: 2048)
+        for turn in [-1, 0, 1, 2] {
+            var geometry = Geometry()
+            geometry.aspect = .fourFive
+            geometry.cropScale = 0.8
+            geometry.centerX = 0.7
+            geometry.centerY = 0.3
+            geometry.straightenDegrees = 7
+            geometry.rotateQuarterTurns = turn
+            let source = NormalizedPoint(0.5, 0.5)
+            let displayed = geometry.outputPoint(fromSourceNormalized: source, sourceSize: size)
+            let restored = geometry.sourcePoint(fromOutputNormalized: displayed, sourceSize: size)
+            XCTAssertEqual(restored.x, source.x, accuracy: 0.000001)
+            XCTAssertEqual(restored.y, source.y, accuracy: 0.000001)
+        }
+    }
+
+    func testFitAndFillFrameWithoutStretching() throws {
+        let source = CIImage(color: .red).cropped(to: CGRect(x: 0, y: 0, width: 100, height: 200))
+        let context = CIContext()
+        let fit = CoreRenderer.applyOutputFrame(source, frame: OutputFrame(width: 200, height: 200, mode: .fit))
+        let fill = CoreRenderer.applyOutputFrame(source, frame: OutputFrame(width: 200, height: 200, mode: .fill))
+        XCTAssertEqual(fit.extent.size, CGSize(width: 200, height: 200))
+        XCTAssertEqual(fill.extent.size, CGSize(width: 200, height: 200))
+        let fitBitmap = NSBitmapImageRep(cgImage: try XCTUnwrap(context.createCGImage(fit, from: fit.extent)))
+        let fillBitmap = NSBitmapImageRep(cgImage: try XCTUnwrap(context.createCGImage(fill, from: fill.extent)))
+        XCTAssertLessThan(try XCTUnwrap(fitBitmap.colorAt(x: 10, y: 100)).redComponent, 0.05)
+        XCTAssertGreaterThan(try XCTUnwrap(fitBitmap.colorAt(x: 100, y: 100)).redComponent, 0.95)
+        XCTAssertGreaterThan(try XCTUnwrap(fillBitmap.colorAt(x: 10, y: 100)).redComponent, 0.95)
+        for mode in [FrameMode.fit, .fill] {
+            let frame = OutputFrame(width: 1080, height: 1920, mode: mode)
+            let input = NormalizedPoint(0.3, 0.7)
+            let shown = frame.outputPoint(fromInputNormalized: input, inputSize: CGSize(width: 800, height: 1000))
+            let restored = frame.inputPoint(fromOutputNormalized: shown, inputSize: CGSize(width: 800, height: 1000))
+            XCTAssertEqual(restored.x, input.x, accuracy: 0.000001)
+            XCTAssertEqual(restored.y, input.y, accuracy: 0.000001)
         }
     }
 }
