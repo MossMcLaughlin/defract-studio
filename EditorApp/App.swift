@@ -6,6 +6,7 @@ import EditorCore
 
 @main
 struct EditorApp: App {
+    @NSApplicationDelegateAdaptor(EditorApplicationDelegate.self) private var applicationDelegate
     var body: some Scene {
         WindowGroup("Photo & Video Editor") {
             EditorView()
@@ -47,6 +48,8 @@ struct EditorView: View {
             Button("Reset All", role: .destructive) { model.change { $0.color = ColorState() } }
         }
         .onAppear { model.maskPanelActive = inspectorTab == "Masks"; model.refresh() }
+        .sheet(isPresented: $model.exportSheetRequested) { ExportSheet(model: model) }
+        .background(WindowCloseObserver(model: model).frame(width: 0, height: 0))
     }
 
     private var toolbar: some View {
@@ -63,7 +66,8 @@ struct EditorView: View {
             Text("Photo & Video Editor").font(.headline).foregroundStyle(.secondary)
             Spacer()
             if model.busy { ProgressView().controlSize(.small) }
-            Button("Export…", action: model.export).disabled(model.draft == nil || model.busy)
+            Button("Export…") { model.exportSheetRequested = true }
+                .disabled(model.draft == nil || model.busy || model.sourceSize == .zero)
                 .keyboardShortcut("e", modifiers: .command)
                 .tint(Color(red: 0.82, green: 0.63, blue: 0.22))
         }

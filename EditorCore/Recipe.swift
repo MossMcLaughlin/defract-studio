@@ -151,12 +151,24 @@ public struct EditRecipe: Codable, Equatable, Sendable {
     public var videoTrim = VideoTrim()
     public var videoCodec: VideoCodec = .h264
     public var outputFrame: OutputFrame?
+    public var sourceFileSize: Int64?
+    public var lastExportedAt: Date?
     public var lastModified = Date()
 
     public init(sourcePath: String, kind: MediaKind) {
         self.sourcePath = sourcePath
         self.kind = kind
     }
+
+    public var hasUnexportedEdits: Bool {
+        let edited = easyIsEdited || !color.manualDelta.isNeutral || !masks.isEmpty
+            || geometry != Geometry() || videoTrim != VideoTrim() || outputFrame != nil
+        guard edited else { return false }
+        guard let lastExportedAt else { return true }
+        return lastModified > lastExportedAt
+    }
+
+    private var easyIsEdited: Bool { color.easy != EasySettings() }
 }
 
 public struct EditHistory: Codable, Sendable {
@@ -181,11 +193,17 @@ public struct EditHistory: Codable, Sendable {
         guard let previous = undoStack.popLast() else { return }
         redoStack.append(current)
         current = previous
+        current.lastModified = Date()
     }
 
     public mutating func redo() {
         guard let next = redoStack.popLast() else { return }
         undoStack.append(current)
         current = next
+        current.lastModified = Date()
+    }
+
+    public mutating func markExported() {
+        current.lastExportedAt = Date()
     }
 }

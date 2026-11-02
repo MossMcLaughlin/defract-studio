@@ -10,6 +10,7 @@ final class EditorModel: ObservableObject {
     @Published var image: NSImage?
     @Published var player: AVPlayer?
     @Published var error: String?
+    @Published var autosaveFailed = false
     @Published var busy = false
     @Published var duration = 0.0
     @Published var seconds = 0.0
@@ -23,18 +24,30 @@ final class EditorModel: ObservableObject {
     @Published var detectingSubject = false
     @Published var sourceSize = CGSize.zero
     @Published var cropEditing = false
+    @Published var exportSheetRequested = false
+    @Published var exportProgress = 0.0
+    @Published var lastExportURL: URL?
+    @Published var exportPreviewFrame: OutputFrame?
+    var closeAfterExport = false
+    var closeWindowAfterExport: (() -> Void)?
 
     private let store: ProjectStore
     private var renderingRevision = 0
     private var gestureStart: EditRecipe?
     private var previewTask: Task<Void, Never>?
     private var subjectTask: Task<Data, Error>?
+    private var exportTask: Task<Void, Never>?
+    private var photoExportTask: Task<Void, Error>?
 
     init(store: ProjectStore? = nil) {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         self.store = store ?? ProjectStore(directory: support.appendingPathComponent("PhotoVideoEditor/Projects"))
         do {
-            items = try self.store.loadAll().sorted { $0.current.lastModified > $1.current.lastModified }
+            let loaded = try self.store.loadRecovering()
+            items = loaded.histories.sorted { $0.current.lastModified > $1.current.lastModified }
+            if !loaded.failedFiles.isEmpty {
+                error = "Some saved sessions could not be opened. Their files were kept for recovery: \(loaded.failedFiles.map(\.lastPathComponent).joined(separator: ", "))"
+            }
             let remembered = UserDefaults.standard.string(forKey: "selectedMediaID")
             let selected = items.first { $0.current.id.uuidString == remembered } ?? items.first
             if let selected { select(selected.current.id) }
@@ -45,6 +58,7 @@ final class EditorModel: ObservableObject {
     var kind: MediaKind? { draft?.kind }
     var canUndo: Bool { items.first { $0.current.id == selectedID }?.undoStack.isEmpty == false }
     var canRedo: Bool { items.first { $0.current.id == selectedID }?.redoStack.isEmpty == false }
+    var hasUnexportedEdits: Bool { autosaveFailed || items.contains { $0.current.hasUnexportedEdits } }
 
     func importFiles() {
         let panel = NSOpenPanel()
@@ -60,7 +74,9 @@ final class EditorModel: ObservableObject {
                 select(existing.current.id)
             } else {
                 let kind: MediaKind = ["mp4", "mov"].contains(url.pathExtension.lowercased()) ? .video : .photo
-                let history = EditHistory(EditRecipe(sourcePath: url.path, kind: kind))
+                var recipe = EditRecipe(sourcePath: url.path, kind: kind)
+                recipe.sourceFileSize = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init)
+                let history = EditHistory(recipe)
                 do {
                     try store.save(history)
                     items.append(history)
@@ -168,8 +184,8 @@ final class EditorModel: ObservableObject {
         guard let draft, let index = items.firstIndex(where: { $0.current.id == draft.id }) else { return }
         items[index].apply { $0 = draft }
         self.draft = items[index].current
-        do { try store.save(items[index]) }
-        catch { self.error = "Autosave failed; edits remain in memory. \(error.localizedDescription)" }
+        do { try store.save(items[index]); autosaveFailed = false }
+        catch { autosaveFailed = true; self.error = "Autosave failed; edits remain in memory. \(error.localizedDescription)" }
     }
 
     func undo() {
@@ -189,8 +205,8 @@ final class EditorModel: ObservableObject {
     }
 
     private func persist(_ index: Int) {
-        do { try store.save(items[index]) }
-        catch { self.error = "Autosave failed; edits remain in memory. \(error.localizedDescription)" }
+        do { try store.save(items[index]); autosaveFailed = false }
+        catch { autosaveFailed = true; self.error = "Autosave failed; edits remain in memory. \(error.localizedDescription)" }
     }
 
     func refresh() {
@@ -205,6 +221,7 @@ final class EditorModel: ObservableObject {
         var renderRecipe = recipe
         if showingOriginal { renderRecipe.color = ColorState(); renderRecipe.masks = [] }
         if cropEditing { renderRecipe.geometry = Geometry(); renderRecipe.outputFrame = nil }
+        else if let exportPreviewFrame { renderRecipe.outputFrame = exportPreviewFrame }
         renderingRevision += 1
         let revision = renderingRevision
         if recipe.kind == .photo {
@@ -244,7 +261,9 @@ final class EditorModel: ObservableObject {
                     duration = assetDuration.seconds.isFinite ? assetDuration.seconds : 0
                     sourceSize = displayedSize
                     let start = recipe.videoTrim.startSeconds
-                    let seek = position.seconds < start ? CMTime(seconds: start, preferredTimescale: 600) : position
+                    let end = recipe.videoTrim.endSeconds ?? assetDuration.seconds
+                    let seek = position.seconds < start || position.seconds >= end
+                        ? CMTime(seconds: start, preferredTimescale: 600) : position
                     await next.seek(to: seek)
                     if wasPlaying { next.play() }
                 } catch { if revision == renderingRevision { self.error = error.localizedDescription } }
@@ -252,29 +271,87 @@ final class EditorModel: ObservableObject {
         }
     }
 
-    func export() {
-        guard let recipe = draft else { return }
-        let source = URL(fileURLWithPath: recipe.sourcePath)
-        let panel = NSSavePanel()
-        panel.nameFieldStringValue = source.deletingPathExtension().lastPathComponent + "-edited." + (recipe.kind == .video ? "mp4" : "jpg")
-        guard panel.runModal() == .OK, let destination = panel.url else { return }
-        busy = true
-        Task {
-            do {
-                if recipe.kind == .video {
-                    try await MediaIO.exportVideo(url: source, to: destination, recipe: recipe)
-                } else {
-                    try MediaIO.exportPhoto(url: source, to: destination, recipe: recipe)
-                }
-            } catch { self.error = "Export failed: \(error.localizedDescription)" }
-            busy = false
+    func previewExport(_ frame: OutputFrame) {
+        exportPreviewFrame = frame
+        refresh()
+    }
+
+    func clearExportPreview() {
+        exportPreviewFrame = nil
+        refresh()
+    }
+
+    func startExport(_ options: ExportOptions, overwrite: Bool) throws {
+        guard let current = draft, !busy else { return }
+        let destination = try options.destination(kind: current.kind)
+        let source = URL(fileURLWithPath: current.sourcePath)
+        guard destination.standardizedFileURL != source.standardizedFileURL else {
+            throw NSError(domain: "Editor", code: 9, userInfo: [NSLocalizedDescriptionKey: "The export destination is the original file."])
         }
+        guard current.kind == .photo || (options.width % 2 == 0 && options.height % 2 == 0) else {
+            throw NSError(domain: "Editor", code: 32, userInfo: [NSLocalizedDescriptionKey: "Video dimensions must be even pixel values."])
+        }
+        try FileManager.default.createDirectory(at: options.folder, withIntermediateDirectories: true)
+        change { $0.outputFrame = options.outputFrame; $0.videoCodec = options.videoCodec }
+        guard let snapshot = draft else { return }
+        busy = true
+        exportProgress = 0
+        lastExportURL = nil
+        exportTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                if snapshot.kind == .video {
+                    try await MediaIO.exportVideo(url: source, to: destination, recipe: snapshot, overwrite: overwrite) { [weak self] value in
+                        Task { @MainActor in self?.exportProgress = value }
+                    }
+                } else {
+                    self.exportProgress = 0.1
+                    let quality = options.preset == .instagram ? 0.88 : options.preset == .general ? 0.90 : 0.95
+                    let work = Task.detached(priority: .userInitiated) {
+                        try MediaIO.exportPhoto(url: source, to: destination, recipe: snapshot,
+                                                format: options.photoFormat, quality: quality, overwrite: overwrite)
+                    }
+                    self.photoExportTask = work
+                    try await work.value
+                }
+                if Task.isCancelled { throw CancellationError() }
+                if let index = self.items.firstIndex(where: { $0.current.id == snapshot.id }), self.items[index].current == snapshot {
+                    self.items[index].markExported()
+                    self.persist(index)
+                    if self.selectedID == snapshot.id { self.draft = self.items[index].current }
+                }
+                self.exportProgress = 1
+                self.lastExportURL = destination
+                if self.closeAfterExport && !self.autosaveFailed {
+                    self.closeAfterExport = false
+                    self.closeWindowAfterExport?()
+                }
+            } catch is CancellationError {
+                self.exportProgress = 0
+            } catch {
+                self.error = "Export failed: \(error.localizedDescription)"
+            }
+            self.busy = false
+            self.photoExportTask = nil
+            self.exportTask = nil
+        }
+    }
+
+    func cancelExport() {
+        photoExportTask?.cancel()
+        exportTask?.cancel()
     }
 
     func relink() {
         guard let id = selectedID else { return }
         let panel = NSOpenPanel()
         guard panel.runModal() == .OK, let url = panel.url else { return }
+        if let expected = draft?.sourceFileSize,
+           let actual = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init),
+           actual != expected {
+            error = "The selected file has a different size from the missing source. Choose the original file."
+            return
+        }
         change { $0.sourcePath = url.path }
         select(id)
     }

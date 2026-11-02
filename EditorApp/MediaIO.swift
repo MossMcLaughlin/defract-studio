@@ -59,21 +59,31 @@ enum MediaIO {
         return cg
     }
 
-    static func exportPhoto(url: URL, to destination: URL, recipe: EditRecipe) throws {
+    static func exportPhoto(url: URL, to destination: URL, recipe: EditRecipe,
+                            format: PhotoFormat = .jpeg, quality: Double = 0.9, overwrite: Bool = false) throws {
+        guard url.standardizedFileURL != destination.standardizedFileURL else {
+            throw NSError(domain: "Editor", code: 9, userInfo: [NSLocalizedDescriptionKey: "The export destination is the original file."])
+        }
         let cropped = CoreRenderer.applyGeometry(CoreRenderer.render(try photoImage(url: url), color: recipe.color, masks: recipe.masks), geometry: recipe.geometry)
         let rendered = CoreRenderer.applyOutputFrame(cropped, frame: recipe.outputFrame)
-        let temporary = destination.deletingLastPathComponent().appendingPathComponent(UUID().uuidString + ".jpg")
+        let temporary = destination.deletingLastPathComponent().appendingPathComponent(UUID().uuidString + "." + format.fileExtension)
         defer { try? FileManager.default.removeItem(at: temporary) }
         guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
               let cg = context.createCGImage(rendered, from: rendered.extent, format: .RGBA8, colorSpace: colorSpace),
-              let output = CGImageDestinationCreateWithURL(temporary as CFURL, "public.jpeg" as CFString, 1, nil) else {
-            throw NSError(domain: "Editor", code: 3, userInfo: [NSLocalizedDescriptionKey: "JPEG export could not start."])
+              let output = CGImageDestinationCreateWithURL(temporary as CFURL, format.imageIOType as CFString, 1, nil) else {
+            throw NSError(domain: "Editor", code: 3, userInfo: [NSLocalizedDescriptionKey: "Photo export could not start."])
         }
-        CGImageDestinationAddImage(output, cg, [kCGImageDestinationLossyCompressionQuality: 0.9] as CFDictionary)
+        let properties: CFDictionary? = format == .jpeg
+            ? [kCGImageDestinationLossyCompressionQuality: quality] as CFDictionary : nil
+        CGImageDestinationAddImage(output, cg, properties)
         guard CGImageDestinationFinalize(output) else {
-            throw NSError(domain: "Editor", code: 4, userInfo: [NSLocalizedDescriptionKey: "JPEG export failed."])
+            throw NSError(domain: "Editor", code: 4, userInfo: [NSLocalizedDescriptionKey: "Photo export failed."])
         }
-        try FileManager.default.moveItem(at: temporary, to: destination)
+        guard CGImageSourceCreateWithURL(temporary as CFURL, nil) != nil else {
+            throw NSError(domain: "Editor", code: 10, userInfo: [NSLocalizedDescriptionKey: "Photo output could not be reopened."])
+        }
+        if Task.isCancelled { throw CancellationError() }
+        try commit(temporary, destination: destination, original: url, overwrite: overwrite)
     }
 
     private static func overlay(_ image: CIImage, recipe: EditRecipe, selectedMaskID: UUID?) -> CIImage {
@@ -110,7 +120,11 @@ enum MediaIO {
         return item
     }
 
-    static func exportVideo(url: URL, to destination: URL, recipe: EditRecipe) async throws {
+    static func exportVideo(url: URL, to destination: URL, recipe: EditRecipe,
+                            overwrite: Bool = false, progress: (@Sendable (Double) -> Void)? = nil) async throws {
+        guard url.standardizedFileURL != destination.standardizedFileURL else {
+            throw NSError(domain: "Editor", code: 9, userInfo: [NSLocalizedDescriptionKey: "The export destination is the original file."])
+        }
         let asset = AVURLAsset(url: url)
         let temporary = destination.deletingLastPathComponent().appendingPathComponent(UUID().uuidString + ".mp4")
         defer { try? FileManager.default.removeItem(at: temporary) }
@@ -129,7 +143,35 @@ enum MediaIO {
             throw NSError(domain: "Editor", code: 7, userInfo: [NSLocalizedDescriptionKey: "Trim must leave at least one video frame."])
         }
         session.timeRange = CMTimeRange(start: CMTime(seconds: start, preferredTimescale: 600), duration: CMTime(seconds: end - start, preferredTimescale: 600))
+        let monitor = Task.detached {
+            while !Task.isCancelled {
+                progress?(Double(session.progress))
+                try? await Task.sleep(for: .milliseconds(200))
+            }
+        }
+        defer { monitor.cancel() }
         try await session.export(to: temporary, as: .mp4)
-        try FileManager.default.moveItem(at: temporary, to: destination)
+        if Task.isCancelled { throw CancellationError() }
+        let output = AVURLAsset(url: temporary)
+        let outputVideo = try await output.loadTracks(withMediaType: .video)
+        let sourceAudio = try await asset.loadTracks(withMediaType: .audio)
+        let outputAudio = try await output.loadTracks(withMediaType: .audio)
+        guard !outputVideo.isEmpty, sourceAudio.isEmpty || !outputAudio.isEmpty else {
+            throw NSError(domain: "Editor", code: 11, userInfo: [NSLocalizedDescriptionKey: "Video output is missing picture or source audio."])
+        }
+        try commit(temporary, destination: destination, original: url, overwrite: overwrite)
+        progress?(1)
+    }
+
+    private static func commit(_ temporary: URL, destination: URL, original: URL, overwrite: Bool) throws {
+        guard destination.standardizedFileURL != original.standardizedFileURL else {
+            throw NSError(domain: "Editor", code: 9, userInfo: [NSLocalizedDescriptionKey: "The export destination is the original file."])
+        }
+        if FileManager.default.fileExists(atPath: destination.path) {
+            guard overwrite else {
+                throw NSError(domain: "Editor", code: 12, userInfo: [NSLocalizedDescriptionKey: "Output already exists. Choose another name or confirm replacement."])
+            }
+            _ = try FileManager.default.replaceItemAt(destination, withItemAt: temporary)
+        } else { try FileManager.default.moveItem(at: temporary, to: destination) }
     }
 }

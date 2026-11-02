@@ -69,6 +69,31 @@ final class CoreTests: XCTestCase {
         XCTAssertEqual(try store.loadAll().count, 1)
     }
 
+    func testExportStateAndCorruptSessionRecovery() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = ProjectStore(directory: directory)
+        var history = EditHistory(EditRecipe(sourcePath: "/tmp/source.jpg", kind: .photo))
+        XCTAssertFalse(history.current.hasUnexportedEdits)
+        history.apply { $0.color.setEasy { $0.waterColor = 50 } }
+        XCTAssertTrue(history.current.hasUnexportedEdits)
+        history.markExported()
+        XCTAssertFalse(history.current.hasUnexportedEdits)
+        try store.save(history)
+        let reopened = try store.load(id: history.current.id)
+        XCTAssertFalse(reopened.current.hasUnexportedEdits)
+        history.apply { $0.color.setEffective(.aquaHue, to: 20) }
+        XCTAssertTrue(history.current.hasUnexportedEdits)
+        history.undo()
+        XCTAssertTrue(history.current.hasUnexportedEdits)
+        let corrupt = directory.appendingPathComponent(UUID().uuidString + ".json")
+        try Data("broken".utf8).write(to: corrupt)
+        let recovered = try store.loadRecovering()
+        XCTAssertEqual(recovered.histories.count, 1)
+        XCTAssertEqual(recovered.failedFiles.map { $0.standardizedFileURL.path }, [corrupt.standardizedFileURL.path])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: corrupt.path))
+    }
+
     func testCropGeometryAcrossOrientations() {
         var geometry = Geometry()
         geometry.aspect = .fourFive

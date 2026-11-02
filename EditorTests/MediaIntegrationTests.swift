@@ -56,6 +56,101 @@ final class MediaIntegrationTests: XCTestCase {
         XCTAssertEqual(try checksum(source), before)
     }
 
+    func testExportOptionsPNGOverwriteAndValidation() throws {
+        let source = fixtures.appendingPathComponent("test_media/photos/IMG_3635.jpeg")
+        let before = try checksum(source)
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        var recipe = EditRecipe(sourcePath: source.path, kind: .photo)
+        var options = ExportOptions(recipe: recipe, sourceSize: CGSize(width: 1536, height: 2048))
+        options.folder = folder
+        options.preset = .instagram
+        options.aspect = .fourFive
+        options.updateSuggestedSize(sourceSize: CGSize(width: 1536, height: 2048), kind: .photo)
+        XCTAssertEqual([options.width, options.height], [1080, 1350])
+        options.photoFormat = .png
+        let output = try options.destination(kind: .photo)
+        recipe.outputFrame = options.outputFrame
+        try MediaIO.exportPhoto(url: source, to: output, recipe: recipe, format: .png)
+        let image = try XCTUnwrap(CGImageSourceCreateWithURL(output as CFURL, nil))
+        let properties = try XCTUnwrap(CGImageSourceCopyPropertiesAtIndex(image, 0, nil) as? [String: Any])
+        XCTAssertEqual(properties[kCGImagePropertyPixelWidth as String] as? Int, 1080)
+        XCTAssertEqual(properties[kCGImagePropertyPixelHeight as String] as? Int, 1350)
+        let first = try checksum(output)
+        XCTAssertThrowsError(try MediaIO.exportPhoto(url: source, to: output, recipe: recipe, format: .png))
+        XCTAssertEqual(try checksum(output), first)
+        recipe.color.setEffective(.exposure, to: 0.3)
+        try MediaIO.exportPhoto(url: source, to: output, recipe: recipe, format: .png, overwrite: true)
+        XCTAssertNotEqual(try checksum(output), first)
+        options.name = "../unsafe"
+        XCTAssertThrowsError(try options.destination(kind: .photo))
+        XCTAssertEqual(try checksum(source), before)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: folder.path), [output.lastPathComponent])
+    }
+
+    func testReefPNGPortraitAndAlphaExport() throws {
+        let source = fixtures.appendingPathComponent("test_media/photos/image.png")
+        let before = try checksum(source)
+        let output = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".png")
+        defer { try? FileManager.default.removeItem(at: output) }
+        let recipe = EditRecipe(sourcePath: source.path, kind: .photo)
+        let preview = try MediaIO.photoPreviewCGImage(url: source, recipe: recipe)
+        XCTAssertEqual(preview.width, 638)
+        XCTAssertEqual(preview.height, 1130)
+        try MediaIO.exportPhoto(url: source, to: output, recipe: recipe, format: .png)
+        let image = try XCTUnwrap(CGImageSourceCreateWithURL(output as CFURL, nil))
+        let rendered = try XCTUnwrap(CGImageSourceCreateImageAtIndex(image, 0, nil))
+        XCTAssertEqual(rendered.width, 638)
+        XCTAssertEqual(rendered.height, 1130)
+        XCTAssertNotEqual(rendered.alphaInfo, .none)
+        XCTAssertEqual(try checksum(source), before)
+    }
+
+    @MainActor func testModelPhotoExportPersistsCompletedState() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let store = ProjectStore(directory: folder.appendingPathComponent("projects"))
+        let source = fixtures.appendingPathComponent("test_media/photos/IMG_3635.jpeg")
+        let model = EditorModel(store: store)
+        model.importURLs([source])
+        model.change { $0.color.setEffective(.exposure, to: 0.4) }
+        XCTAssertTrue(model.hasUnexportedEdits)
+        var options = ExportOptions(recipe: try XCTUnwrap(model.draft), sourceSize: CGSize(width: 1536, height: 2048))
+        options.folder = folder
+        options.width = 600
+        options.height = 800
+        try model.startExport(options, overwrite: false)
+        for _ in 0..<100 where model.busy { try await Task.sleep(for: .milliseconds(100)) }
+        XCTAssertFalse(model.busy)
+        XCTAssertNil(model.error)
+        XCTAssertEqual(model.exportProgress, 1)
+        XCTAssertFalse(model.hasUnexportedEdits)
+        let output = try XCTUnwrap(model.lastExportURL)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: output.path))
+        let reopened = EditorModel(store: store)
+        XCTAssertFalse(reopened.hasUnexportedEdits)
+    }
+
+    func testCancelledVideoExportLeavesNoOutput() async throws {
+        let source = fixtures.appendingPathComponent("test_media/videos/GX011247.MP4")
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let output = folder.appendingPathComponent("cancelled.mp4")
+        var recipe = EditRecipe(sourcePath: source.path, kind: .video)
+        recipe.outputFrame = OutputFrame(width: 1080, height: 1920, mode: .fit)
+        let work = Task { try await MediaIO.exportVideo(url: source, to: output, recipe: recipe) }
+        try await Task.sleep(for: .milliseconds(100))
+        work.cancel()
+        do {
+            try await work.value
+            XCTFail("Export unexpectedly completed after cancellation")
+        } catch { XCTAssertTrue(error is CancellationError || (error as NSError).code == NSUserCancelledError) }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: output.path))
+        XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: folder.path).isEmpty)
+    }
+
     func testMain10PortraitVideoGradeAndExport() async throws {
         let source = fixtures.appendingPathComponent("test_media/videos/GX011247.MP4")
         let before = try checksum(source)
