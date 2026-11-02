@@ -36,15 +36,23 @@ final class MediaIntegrationTests: XCTestCase {
         let before = try checksum(source)
         let output = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".jpg")
         defer { try? FileManager.default.removeItem(at: output) }
-        let grade = BasicGrade(exposure: 0.4, saturation: 15)
-        let preview = try MediaIO.photoPreview(url: source, grade: grade)
-        XCTAssertEqual(Int(preview.size.width), 1536)
-        try MediaIO.exportPhoto(url: source, to: output, grade: grade)
+        var color = ColorState()
+        color.setEasy { $0.waterColor = 50; $0.colorRecovery = 40; $0.light = 20 }
+        color.setEffective(.aquaHue, to: 20)
+        let adjustment = color.effective
+        var geometry = Geometry()
+        geometry.aspect = .fourFive
+        let preview = try MediaIO.photoPreview(url: source, adjustment: adjustment, geometry: geometry)
+        XCTAssertEqual(Int(preview.size.width), 1350)
+        try MediaIO.exportPhoto(url: source, to: output, adjustment: adjustment, geometry: geometry)
         let image = try XCTUnwrap(CGImageSourceCreateWithURL(output as CFURL, nil))
         XCTAssertEqual(CGImageSourceGetCount(image), 1)
         let properties = try XCTUnwrap(CGImageSourceCopyPropertiesAtIndex(image, 0, nil) as? [String: Any])
         XCTAssertEqual(properties[kCGImagePropertyPixelWidth as String] as? Int, 1536)
-        XCTAssertEqual(properties[kCGImagePropertyPixelHeight as String] as? Int, 2048)
+        XCTAssertEqual(properties[kCGImagePropertyPixelHeight as String] as? Int, 1920)
+        let previewCG = try XCTUnwrap(preview.cgImage(forProposedRect: nil, context: nil, hints: nil))
+        let exportedCG = try XCTUnwrap(CGImageSourceCreateImageAtIndex(image, 0, nil))
+        XCTAssertLessThan(meanRGBDifference(previewCG, exportedCG), 0.12)
         XCTAssertEqual(try checksum(source), before)
     }
 
@@ -69,8 +77,10 @@ final class MediaIntegrationTests: XCTestCase {
         XCTAssertEqual(sourceMetadata?["CVImageBufferYCbCrMatrix"] as? String, "ITU_R_709_2")
         let output = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".mp4")
         defer { try? FileManager.default.removeItem(at: output) }
-        let grade = BasicGrade(exposure: 0.25, saturation: 12)
-        let item = try await MediaIO.videoItem(url: source, grade: grade)
+        var adjustment = AdjustmentVector()
+        adjustment[.exposure] = 0.25
+        adjustment[.saturation] = 12
+        let item = try await MediaIO.videoItem(url: source, adjustment: adjustment)
         XCTAssertNotNil(item.videoComposition)
         let generator = AVAssetImageGenerator(asset: input)
         generator.videoComposition = item.videoComposition
@@ -78,7 +88,7 @@ final class MediaIntegrationTests: XCTestCase {
         generator.maximumSize = CGSize(width: 128, height: 128)
         let previewFrame = try await generator.image(at: CMTime(seconds: 0.5, preferredTimescale: 600)).image
         XCTAssertGreaterThan(previewFrame.height, previewFrame.width)
-        try await MediaIO.exportVideo(url: source, to: output, grade: grade)
+        try await MediaIO.exportVideo(url: source, to: output, adjustment: adjustment)
         let exported = AVURLAsset(url: output)
         let outputTracks = try await exported.loadTracks(withMediaType: .video)
         let track = try XCTUnwrap(outputTracks.first)
@@ -112,6 +122,17 @@ final class MediaIntegrationTests: XCTestCase {
             try VNImageRequestHandler(url: source).perform([request])
             let observation = request.results?.first
             print("Vision \(name): \(observation?.allInstances.count ?? 0) instances")
+        }
+    }
+
+    func testWhiteBalanceControlsChangeRealPhoto() throws {
+        let source = fixtures.appendingPathComponent("test_media/photos/IMG_3635.jpeg")
+        let neutral = try MediaIO.photoPreviewCGImage(url: source, adjustment: AdjustmentVector())
+        for parameter in [Parameter.temperature, .tint] {
+            var adjustment = AdjustmentVector()
+            adjustment[parameter] = 50
+            let edited = try MediaIO.photoPreviewCGImage(url: source, adjustment: adjustment)
+            XCTAssertGreaterThan(meanRGBDifference(neutral, edited), 0.001, "\(parameter) had no visible effect")
         }
     }
 }

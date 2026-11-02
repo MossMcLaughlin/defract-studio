@@ -29,7 +29,7 @@ The source SHA-256 values remained `ae79f0c6e0397a239d32600d4dee956a2630b1aef374
 
 ## Remaining gates
 
-- Gate 1: **NOT TESTED / NOT COMPLETE** — full edit recipe, persistence, undo, Easy/Advanced mapping, HSL, global UI, file list and crop.
+- Gate 1: **PASSED for implemented global editing path**, 2026-11-02. The same build/test commands above completed (`BUILD SUCCEEDED`, `TEST SUCCEEDED`, 11 tests, 0 failures) after Gate 1 changes. The rebuilt app launched as a new process. Tests covered the versioned base/delta/effective recipe round-trip, all math controls on representative pixels, actual white-balance pixel changes, deterministic Easy knot interpolation and Green hue direction, bounded undo/redo and atomic reopen, portrait/landscape crop geometry, real 4:5 cropped JPEG preview/export parity, and the 10-bit video grade/export parity. The full global inspector, file list, autosave, shortcuts and before/after are implemented; their interactive UX remains **NOT TESTED** because this session could not capture or control the visible display. Photo crop currently offers aspect and position controls; draggable edges, rotate and straighten remain Gate 2.
 - Gate 2: **NOT TESTED / NOT COMPLETE** — manual/photo masks, static video gradients, complete geometry, trim, all three GoPro exports.
 - Gate 3: **NOT TESTED / NOT COMPLETE** — preset UI, progress/cancel, close prompts, accessibility and final handoff.
 
