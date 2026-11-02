@@ -1,1 +1,0 @@
-Place `GX011123.MP4`, `GX011176.MP4`, and `GX011247.MP4` in this folder when using the LIGHT package. The FULL-MEDIA package already contains these three originals. `GX011247.MP4` is a verified HEVC Main 10 10-bit Rec.709 SDR (not HDR) portrait clip. Never include the duplicate `GX011247(1).MP4`. Do not commit test media to a public repository.

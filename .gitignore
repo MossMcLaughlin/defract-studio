@@ -1,0 +1,6 @@
+test_media/
+test_outputs/
+.build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
