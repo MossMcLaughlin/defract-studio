@@ -4,6 +4,8 @@ Last updated: 2026-11-03. This is the current status record; earlier gate-by-gat
 
 ## Build and automated tests
 
+Color-engine upgrade checkpoint in progress (2026-11-03): the requested `.handoff/current/TASK.md` was absent; an untracked repository-root `TASK.md` contained the seven-checkpoint color specification and was left untouched. Baseline Xcode tests passed before edits. A `SourceColorDescriptor` probe now reads ImageIO photo profile/depth evidence and CoreMedia video bit depth, primaries, transfer, matrix, and range evidence. A focused fixture test distinguished `GX011123.MP4` as 8-bit SDR and `GX011247.MP4` as 10-bit SDR; the photo fixture's ICC color space was present but unnamed, so the probe records embedded ICC evidence. An optional renderer-version field decodes absent legacy values without migration. New recipes remain explicitly on renderer v1; no new color math is active. The full `xcodebuild ... test` command below passed **30 tests, 0 failures, 0 skips** (`Test-EditorApp-2026.11.03_04-43-59--0500.xcresult`). Checkpoints 2–7, saved source interpretation, HDR/Log adapters, noise protection, Clarity/Dehaze, output precision, performance measurement, and visual grade evaluation remain unfinished. No image-quality improvement is claimed.
+
 Development machine: Apple M1 MacBook Pro, macOS 26.5.2, Xcode 26.6 (17F113), macOS SDK 26.5. The app targets macOS 15+, but an actual macOS 15 runtime has **not** been tested. Local Debug builds use `CODE_SIGNING_ALLOWED=NO`.
 
 ```sh

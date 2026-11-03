@@ -31,6 +31,21 @@ final class MediaIntegrationTests: XCTestCase {
         return total / (64 * 3)
     }
 
+    func testSourceColorDescriptorsUseMediaMetadata() async throws {
+        let tenBit = fixtures.appendingPathComponent("test_media/videos/GX011247.MP4")
+        let eightBit = fixtures.appendingPathComponent("test_media/videos/GX011123.MP4")
+        let photo = fixtures.appendingPathComponent("test_media/photos/P8110319.JPG")
+        let high = try await MediaIO.sourceColorDescriptor(url: tenBit, kind: .video)
+        let standard = try await MediaIO.sourceColorDescriptor(url: eightBit, kind: .video)
+        let still = try await MediaIO.sourceColorDescriptor(url: photo, kind: .photo)
+        XCTAssertEqual(high.sourceBitDepth, 10)
+        XCTAssertEqual(standard.sourceBitDepth, 8)
+        XCTAssertEqual(high.dynamicRange, .sdr)
+        XCTAssertEqual(standard.dynamicRange, .sdr)
+        XCTAssertNotNil(high.primaries)
+        XCTAssertNotNil(still.profile)
+    }
+
     func testPhotoGradeAndExportPreserveOriginal() throws {
         let source = fixtures.appendingPathComponent("test_media/photos/P8110319.JPG")
         let before = try checksum(source)

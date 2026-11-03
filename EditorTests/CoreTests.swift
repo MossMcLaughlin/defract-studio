@@ -4,6 +4,20 @@ import AppKit
 import EditorCore
 
 final class CoreTests: XCTestCase {
+    func testRendererVersionDefaultsAndLegacyDecode() throws {
+        let current = EditRecipe(sourcePath: "/tmp/source.jpg", kind: .photo)
+        XCTAssertEqual(current.rendererVersion, 1)
+        XCTAssertEqual(current.color.underwaterMappingVersion, 1)
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(current)) as? [String: Any])
+        object.removeValue(forKey: "rendererVersion")
+        object.removeValue(forKey: "sourceColor")
+        object["schemaVersion"] = 1
+        var legacy = try JSONDecoder().decode(EditRecipe.self, from: JSONSerialization.data(withJSONObject: object))
+        XCTAssertNil(legacy.rendererVersion)
+        XCTAssertEqual(legacy.color.underwaterMappingVersion, 1)
+        legacy.color.setEasy { $0.visibility = 100 }
+        XCTAssertEqual(legacy.color.effective[.contrast], 12)
+    }
     func testNeutralIdentity() {
         let source = CIImage(color: CIColor(red: 0.2, green: 0.4, blue: 0.8))
             .cropped(to: CGRect(x: 0, y: 0, width: 2, height: 2))

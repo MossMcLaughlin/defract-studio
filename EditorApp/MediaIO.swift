@@ -13,6 +13,44 @@ enum MediaIO {
         return cache
     }()
 
+    static func sourceColorDescriptor(url: URL, kind: MediaKind) async throws -> SourceColorDescriptor {
+        if kind == .photo {
+            guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+                  let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [String: Any] else {
+                throw NSError(domain: "Editor", code: 13, userInfo: [NSLocalizedDescriptionKey: "Photo color metadata could not be read."])
+            }
+            let image = CGImageSourceCreateImageAtIndex(source, 0, nil)
+            let profile = image?.colorSpace.flatMap { space -> String? in
+                if let name = space.name { return name as String }
+                return space.copyICCData() != nil ? "embedded ICC" : nil
+            }
+            let depth = properties[kCGImagePropertyDepth as String] as? Int
+            return SourceColorDescriptor(sourceBitDepth: depth, profile: profile,
+                                         dynamicRange: .sdr,
+                                         orientation: properties[kCGImagePropertyOrientation as String] as? Int,
+                                         evidence: profile == nil ? "ImageIO; untagged SDR assumption" : "ImageIO embedded color space")
+        }
+        let asset = AVURLAsset(url: url)
+        guard let track = try await asset.loadTracks(withMediaType: .video).first,
+              let format = try await track.load(.formatDescriptions).first else {
+            throw NSError(domain: "Editor", code: 14, userInfo: [NSLocalizedDescriptionKey: "Video color metadata could not be read."])
+        }
+        let extensions = CMFormatDescriptionGetExtensions(format) as? [String: Any] ?? [:]
+        let primaries = extensions[kCMFormatDescriptionExtension_ColorPrimaries as String] as? String
+        let transfer = extensions[kCMFormatDescriptionExtension_TransferFunction as String] as? String
+        let matrix = extensions[kCMFormatDescriptionExtension_YCbCrMatrix as String] as? String
+        let depth = extensions[kCMFormatDescriptionExtension_BitsPerComponent as String] as? Int
+        let range = extensions[kCMFormatDescriptionExtension_FullRangeVideo as String] as? Bool
+        let dynamicRange: SourceColorDescriptor.DynamicRange
+        if transfer?.localizedCaseInsensitiveContains("HLG") == true { dynamicRange = .hlg }
+        else if transfer?.localizedCaseInsensitiveContains("PQ") == true || transfer?.localizedCaseInsensitiveContains("2084") == true { dynamicRange = .pq }
+        else if transfer != nil { dynamicRange = .sdr }
+        else { dynamicRange = .unknown }
+        return SourceColorDescriptor(sourceBitDepth: depth, primaries: primaries, transfer: transfer,
+                                     matrix: matrix, fullRange: range, dynamicRange: dynamicRange,
+                                     evidence: "CoreMedia format description")
+    }
+
     static func photoImage(url: URL) throws -> CIImage {
         guard let image = CIImage(contentsOf: url, options: [.applyOrientationProperty: true]) else {
             throw NSError(domain: "Editor", code: 1, userInfo: [NSLocalizedDescriptionKey: "Image could not be decoded."])

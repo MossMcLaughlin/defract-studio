@@ -137,6 +137,33 @@ public enum EasyMapping {
 
 public enum MediaKind: String, Codable, Sendable { case photo, video }
 
+public struct SourceColorDescriptor: Codable, Equatable, Sendable {
+    public enum DynamicRange: String, Codable, Sendable { case sdr, hlg, pq, unknown }
+    public var sourceBitDepth: Int?
+    public var primaries: String?
+    public var transfer: String?
+    public var matrix: String?
+    public var fullRange: Bool?
+    public var profile: String?
+    public var dynamicRange: DynamicRange
+    public var orientation: Int?
+    public var evidence: String
+
+    public init(sourceBitDepth: Int? = nil, primaries: String? = nil, transfer: String? = nil,
+                matrix: String? = nil, fullRange: Bool? = nil, profile: String? = nil,
+                dynamicRange: DynamicRange = .unknown, orientation: Int? = nil, evidence: String) {
+        self.sourceBitDepth = sourceBitDepth
+        self.primaries = primaries
+        self.transfer = transfer
+        self.matrix = matrix
+        self.fullRange = fullRange
+        self.profile = profile
+        self.dynamicRange = dynamicRange
+        self.orientation = orientation
+        self.evidence = evidence
+    }
+}
+
 public struct VideoTrim: Codable, Equatable, Sendable {
     public var startSeconds = 0.0
     public var endSeconds: Double?
@@ -147,6 +174,8 @@ public enum VideoCodec: String, Codable, Sendable { case h264, hevc }
 
 public struct EditRecipe: Codable, Equatable, Sendable {
     public var schemaVersion = 1
+    public var rendererVersion: Int?
+    public var sourceColor: SourceColorDescriptor?
     public var id = UUID()
     public var sourcePath: String
     public var kind: MediaKind
@@ -163,6 +192,7 @@ public struct EditRecipe: Codable, Equatable, Sendable {
     public init(sourcePath: String, kind: MediaKind) {
         self.sourcePath = sourcePath
         self.kind = kind
+        self.rendererVersion = 1
     }
 
     public var hasUnexportedEdits: Bool {
