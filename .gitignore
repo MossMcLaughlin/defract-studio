@@ -4,3 +4,6 @@ test_outputs/
 DerivedData/
 *.xcuserstate
 xcuserdata/
+
+/.handoff/
+.DS_Store

@@ -22,6 +22,8 @@ Create a simple editor with selected Lightroom-like color controls for real-worl
 
 **Photo masks:** Automatic foreground instance detection if Vision returns reasonable subjects, plus independent manual brush Add/Erase, brush size/feather, selection invert, radial and linear gradient masks; mask-local adjustment inspector uses the same Advanced parameter definitions. Multiple independent masks permitted. If ML fails, manual mask still usable. Persist each mask and brush corrections.
 
+An existing mask can also be duplicated as an independent inverse with neutral local adjustments. The copy retains source-aligned selection/refinement data and can be edited separately.
+
 **Video masks:** Static linear and radial gradient masks with editable position, direction and feather; local Advanced color adjustments only. No object segmentation, person masks or tracking on video.
 
 **Geometry:** Crop/straighten/rotate, source/original aspect ratio and presets 1:1, 4:5, 9:16, 16:9, custom orientation/position; fit/fill behavior in output. Video has simple start/end trim and playback/scrubbing, no multi-track timeline.
@@ -49,3 +51,5 @@ No multi-clip video assembly, audio editing, automatic bulk rendering, large ass
 ## Quality bar
 
 Small source tree, usable app window, no hidden data loss, no broken exports, meaningful visible effect from every offered control, and deterministic restores. Document non-goals honestly.
+
+The supplied fixture files are local development data. Exclude large `test_media/` and generated exports from future Git commits; do not remove local fixtures or rewrite existing history. The application itself remains offline, with no telemetry, account, or upload path. Signing, notarization, App Store distribution, and an iPhone app are separate future work.

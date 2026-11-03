@@ -4,7 +4,7 @@
 
 ## 1. Source fixture manifest
 
-`test_media/` is a directory the coding agent should populate with the user's originals. The lightweight ZIP bundles five still-image samples under `test_media/photos/` but intentionally excludes the large MP4 originals. The full-media ZIP includes **all three verified GoPro clips**, including `GX011247.MP4`, under `test_media/videos/`. For the light version, place the videos there manually using the original names. Never modify test originals; store exports in `test_outputs/` (gitignored).
+`test_media/` contains the local fixtures listed below. Keep them on disk for development and out of future Git commits because they are large. Never modify test originals; store generated outputs in `test_outputs/` or a temporary directory (both excluded from Git).
 
 | File | Available format / pixel size | Primary test | Expected behavior |
 |---|---|---|---|
@@ -94,4 +94,4 @@ After the MVP: for each photo record environment (blue/green, depth/light, subje
 
 ## 6. Files, licensing, privacy
 
-All user fixtures remain private local test data; add `test_media/` and `test_outputs/` to `.gitignore`; don't commit these to a public repo or include originals in the published app. Use the provided `reference/UI_REFERENCE.png` only as a UI direction reference; it is not an image with a real implemented editor. Images of real people should not be re-used in marketing without consent.
+The fixture files are local development data and may show real people; do not include them in the published app or use them for marketing without consent. `test_media/` and `test_outputs/` are ignored. `reference/UI_REFERENCE.png` is a UI concept image, not a screenshot of a functioning editor.

@@ -1,43 +1,23 @@
-# AGENTS.md — Binding Implementation Instructions
+# Agent instructions
 
-You are building a practical, local-first **native macOS photo and single-clip video editor**. Read every specification in `README.md` before coding. Implement with disciplined simplicity, objective self-verification, and a strong bias toward completed working features over elegant but untested abstractions.
+Defract Studio is a local-first native macOS photo and single-clip video editor. The user handles product design and UX decisions separately. Implement approved specifications as written; do not independently redesign the product or add adjacent features.
 
-## Priorities (in order)
+## Start each implementation task
 
-1. Correct media interpretation, preview and export; originals untouched; no lost edit metadata.
-2. Genuinely responsive shared photo/video color grading and required masks.
-3. Agreed UX, easy/advanced behavior, output framing and non-destructive persistence.
-4. Modest, idiomatic, maintainable Swift code and easily repeatable tests.
-5. Polish; do not spend early work on unsupported features, elaborate branding or premature optimization.
+1. Check Git status and read `.handoff/current/` for the current task and any temporary reference assets. If that directory is empty, use the user's direct request.
+2. Read only the relevant current documentation: `README.md` for setup and navigation, `PRODUCT_MVP.md` for scope, `UX_SPEC.md` and `reference/STYLE_GUIDE_v0.1.md` for approved interaction and visual direction, `COLOR_ENGINE.md` for color behavior, `DEV_NOTES.md` for the actual implementation, `MEDIA_AND_TESTS.md` for fixtures, and `VERIFICATION_REPORT.md` for current status. Consult Git history for older decisions when needed; do not repeatedly process retired specifications.
+3. Resolve routine engineering choices independently. Clarify only a genuine product ambiguity, blocker, or risky operation. Preserve unrelated work and local media. Keep reads, tool output, and documentation focused to avoid repeatedly spending time on historical material.
 
-## Mandatory engineering rules
+## Engineering rules
 
-- Target macOS 15+ Apple Silicon; Swift / SwiftUI / Core Image / AVFoundation / Vision / ImageIO / Metal where necessary. No third-party runtime packages without measured need. Use AppKit only for desktop-specific components/behaviors where SwiftUI is insufficient.
-- Core edit models, color math, mask math and renderer must **not** import AppKit or depend on macOS window controls; keep them portable enough for a future iPhone app. Do not attempt an iOS app now.
-- Prefer one Xcode app target plus one shared core module/package and a test target. Avoid an elaborate plugin architecture, DI container, architecture framework, speculative repositories, and redundant wrappers.
-- One canonical edit recipe, renderer and export path. Photo and video share the same adjustment evaluation. For media-specific processing, use thin adapters.
-- Rendered preview frames and caches are disposable; never save edited copies into originals, even temporarily. Write exports to temporary output and commit on success.
-- Implement visible controls fully or hide them; no fake slider behavior, unsupported formats, placeholder export buttons or misleading “dehaze” labels.
-- Make rendering parameter values deterministic. Easy curve updates change only their base contribution; manual Advanced changes are stored as delta; effective = base + delta. Store both terms and the effective values through serialization tests.
-- Never use an automatic mask result as the only possible selection path. Preserve user brush correction and source-aligned mask data. No video subject mask.
-- Use current SDK APIs: check Xcode availability, warnings and official documentation. **Do not call a macOS 26-only API unguarded when targeting macOS 15.** Check availability of `AVVideoComposition.init(applyingFiltersTo:applier:)` (introduced in the 26 SDK family); use a supported older composition API for macOS 15–25 when required, even if deprecated by the newest SDK. Keep the compatibility branch minimal and test actual preview/export behavior. Do not suppress necessary compatibility warnings dishonestly.
-- Specifically verify `GX011247.MP4` (HEVC Main 10, 10-bit Rec.709 **SDR**) for correct decoded color, portrait orientation, adjusted preview/export and audio. Do not call this an HDR sample. Do not use raw, guessed color-space transforms. Honor metadata, sRGB/Rec.709 SDR output, orientation and permitted HDR tone mapping. If a file cannot be safely processed, explain the limitation rather than silently grading it wrong.
-- Add small, relevant automated tests for state, curves, masks, geometry, file IO, undo and media output. Test with actual supplied fixtures. Every checkpoint builds cleanly before proceeding.
-- Keep comments and documentation focused on **why** decisions were made. Avoid excessive generated scaffolding, files, comments, logging, and fallback branches.
-- Never claim tests passed unless invoked and verified on the machine. If GUI or signing cannot be checked, label that explicitly.
+- Target macOS 15+ on Apple Silicon. Use Swift, SwiftUI, Core Image, AVFoundation, Vision, ImageIO, and AppKit only where desktop behavior needs it. Add no third-party runtime dependency without a demonstrated need.
+- Keep `EditorCore/` independent of AppKit and window controls. Use one canonical edit recipe and shared color/mask renderer for photo and video, with thin media adapters. Preserve source orientation, color metadata, audio, and original files. Export to a temporary file and commit on success.
+- Easy controls contribute a deterministic base; Advanced manual changes are deltas; effective values are base plus delta. Preserve both terms, source-aligned masks and brush corrections, undo history, and backward-compatible project data. Automatic subject selection must always have a manual photo brush fallback; video masks remain static gradients.
+- Keep source and tests modest. Implement visible controls fully or hide them. Avoid architecture rewrites, speculative abstractions, fake behavior, and unsupported media claims. Never call a macOS 26-only API unguarded on the macOS 15 deployment target. The supplied `GX011247.MP4` is **10-bit HEVC Rec.709 SDR**, not HDR.
+- Keep `test_media/`, exports, and build products out of future commits. The local fixtures are development data, not material to purge; do not rewrite Git history. Do not add analytics, accounts, uploads, secrets, or external services.
 
-## Workflow: one handoff, many internal checkpoints
+## Finish each task
 
-Implement in the sequence in `IMPLEMENTATION_PLAN.md`. You may make independent routine engineering choices and fix failures without requiring human approval. At each checkpoint: compile; run focused tests; capture known limitations; commit or otherwise checkpoint a buildable state. If a platform limitation blocks a requirement, implement the simplest viable alternative without dropping the feature silently, and document the tradeoff. Prefer completion over stopping for nonessential decisions.
+Build and run focused/full Xcode tests after meaningful changes. Use real supplied fixtures and actual app interaction where the task requires UX verification; distinguish tested results from assumptions. Keep the repo buildable at checkpoints and commit only task-related, verified changes when appropriate.
 
-## Required final delivery
-
-- Launchable Xcode project, reproducible build instructions and a clearly identified app entry point.
-- Real functionality for all MVP requirements (subject ML best effort, with manual fallback always working).
-- `README.md` for users, `DEV_NOTES.md` for maintainers, tests, and `VERIFICATION_REPORT.md` with exact build/test commands and outcomes, tested media, known issues, and any feature shortfall.
-- A concise summary of directory layout and where to change color mappings, UI style tokens and export presets.
-- No secrets, API keys, external service dependencies, external analytics or uploads.
-
-## Definition of failure
-
-A static SwiftUI mockup, successful compilation alone, a non-working export, a preview that does not match output, editing a duplicated source as if original, lost mask refinement on reopen, or ignored video rotation does **not** meet acceptance. Do not describe those as a finished MVP.
+After success, update affected canonical documentation and the current status in `VERIFICATION_REPORT.md`. Keep reports concise instead of accumulating per-task duplicates. Temporary handoff files may be cleared **only after** their lasting decisions are incorporated into canonical documents and verification succeeds; otherwise leave them for continuation. `.handoff/` is ignored by Git, so any decision needed by future contributors must also be written in tracked documentation. Report unresolved issues precisely.

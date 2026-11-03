@@ -27,4 +27,8 @@ Edits and undo history are stored in `~/Library/Application Support/PhotoVideoEd
 
 The editor processes SDR media into sRGB photos or Rec.709 MP4. The supplied `GX011247.MP4` is 10-bit HEVC Main 10 **SDR**, and its export is intentionally converted to an SDR delivery codec. HDR and RAW-specific workflows, multi-clip editing, video subject tracking, and batch export are outside this MVP. Automatic subject selection depends on Apple's Vision result; manual brush selection is always available for photos.
 
-See `VERIFICATION_REPORT.md` for exact machine-tested results and limits, `DEV_NOTES.md` for implementation details, and the remaining specification documents for the original product contract.
+See `VERIFICATION_REPORT.md` for machine-tested results and open checks; `DEV_NOTES.md` for the actual architecture; `PRODUCT_MVP.md`, `UX_SPEC.md`, and `COLOR_ENGINE.md` for approved behavior; and `MEDIA_AND_TESTS.md` for local fixtures. `reference/STYLE_GUIDE_v0.1.md` and `reference/UI_REFERENCE.png` are the visual references.
+
+## Implementation handoffs
+
+Place the next approved task and any temporary screenshots or reference assets in `.handoff/current/` (create it if absent). The folder is ignored by Git. Codex reads that task and only the relevant current documents, implements and verifies it, then updates the affected canonical documents and `VERIFICATION_REPORT.md`. Once verified and captured in tracked documentation, temporary handoff material can be cleared. Older specifications and completed gate plans remain available in Git history.
