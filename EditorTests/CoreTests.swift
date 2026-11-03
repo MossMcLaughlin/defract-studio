@@ -4,6 +4,142 @@ import AppKit
 import EditorCore
 
 final class CoreTests: XCTestCase {
+    private let linearSpace = CGColorSpace(name: CGColorSpace.extendedLinearSRGB)!
+
+    private func floatPixels(_ image: CIImage) -> [Float] {
+        let width = Int(image.extent.width), height = Int(image.extent.height)
+        var pixels = [Float](repeating: 0, count: width * height * 4)
+        let context = CIContext(options: [.workingColorSpace: linearSpace, .workingFormat: CIFormat.RGBAh])
+        pixels.withUnsafeMutableBytes { bytes in
+            context.render(image, toBitmap: bytes.baseAddress!, rowBytes: width * 16,
+                           bounds: image.extent, format: .RGBAf, colorSpace: linearSpace)
+        }
+        return pixels
+    }
+
+    private func noisyEdgeImage() -> CIImage {
+        let width = 128, height = 64
+        var pixels = [Float](repeating: 0, count: width * height * 4)
+        for y in 0..<height {
+            for x in 0..<width {
+                let base: (Float, Float, Float) = x < 64 ? (0.2, 0.2, 0.2) : (0.36, 0.115, 0.30)
+                let seed = (x * 7919 + y * 104729) % 1009
+                let colorNoise = (Float(seed) / 1009 - 0.5) * 0.045
+                let lumaNoise = (Float((seed * 73) % 1009) / 1009 - 0.5) * 0.018
+                let offset = (y * width + x) * 4
+                pixels[offset] = base.0 + colorNoise + lumaNoise
+                pixels[offset + 1] = base.1 - colorNoise * 0.30 + lumaNoise
+                pixels[offset + 2] = base.2 - colorNoise + lumaNoise
+                pixels[offset + 3] = 1
+            }
+        }
+        let data = pixels.withUnsafeBytes { Data($0) }
+        return CIImage(bitmapData: data, bytesPerRow: width * 16,
+                       size: CGSize(width: width, height: height), format: .RGBAf, colorSpace: linearSpace)
+    }
+
+    func testV4NeutralAndLegacyV3Bypass() {
+        let source = noisyEdgeImage()
+        var recipe = EditRecipe(sourcePath: "/tmp/noise.png", kind: .photo)
+        XCTAssertTrue(RenderPlan(recipe: recipe).grade(source) === source)
+        recipe.rendererVersion = 3
+        recipe.detail.colorNoise = 100
+        XCTAssertTrue(RenderPlan(recipe: recipe).grade(source) === source)
+        recipe.rendererVersion = 4
+        recipe.detail.autoProtection = false
+        recipe.detail.colorNoise = 0
+        XCTAssertTrue(RenderPlan(recipe: recipe).grade(source) === source)
+    }
+
+    func testV4ManualNoiseReducesFlatChromaAndRetainsColorEdge() {
+        let source = noisyEdgeImage()
+        var recipe = EditRecipe(sourcePath: "/tmp/noise.png", kind: .photo)
+        recipe.detail.autoProtection = false
+        recipe.detail.colorNoise = 80
+        recipe.detail.luminanceNoise = 30
+        let output = RenderPlan(recipe: recipe).grade(source)
+        let before = floatPixels(source), after = floatPixels(output)
+        func value(_ pixels: [Float], x: Int, y: Int) -> Double {
+            let offset = (y * 128 + x) * 4
+            return Double(pixels[offset] - pixels[offset + 2])
+        }
+        func deviation(_ pixels: [Float]) -> Double {
+            let values = (12..<52).flatMap { y in (12..<52).map { x in value(pixels, x: x, y: y) } }
+            let mean = values.reduce(0, +) / Double(values.count)
+            return sqrt(values.reduce(0) { $0 + pow($1 - mean, 2) } / Double(values.count))
+        }
+        let reduction = 1 - deviation(after) / deviation(before)
+        let leftBefore = (12..<52).map { value(before, x: 60, y: $0) }.reduce(0, +) / 40
+        let rightBefore = (12..<52).map { value(before, x: 67, y: $0) }.reduce(0, +) / 40
+        let leftAfter = (12..<52).map { value(after, x: 60, y: $0) }.reduce(0, +) / 40
+        let rightAfter = (12..<52).map { value(after, x: 67, y: $0) }.reduce(0, +) / 40
+        let edgeRetention = abs(rightAfter - leftAfter) / abs(rightBefore - leftBefore)
+        print("CP4_SYNTH chroma_reduction=\(reduction) edge_retention=\(edgeRetention)")
+        XCTAssertGreaterThan(reduction, 0.20)
+        XCTAssertGreaterThan(edgeRetention, 0.90)
+        XCTAssertEqual(floatPixels(output), floatPixels(RenderPlan(recipe: recipe).grade(source)))
+    }
+
+    func testV4AnalysisPersistenceUndoAndInvalidation() throws {
+        var recipe = EditRecipe(sourcePath: "/tmp/source.mov", kind: .video)
+        let identity = NoiseAnalysisIdentity(recipe: recipe, fileSize: 100, modificationTime: 10)
+        let analysis = NoiseAnalysis(identity: identity, chromaSigma: 0.01, luminanceSigma: 0.005,
+                                     confidence: 0.8, validTiles: 10, frameCount: 3)
+        var history = EditHistory(recipe)
+        history.setNoiseAnalysis(analysis)
+        history.apply { $0.detail.colorNoise = 40 }
+        history.undo()
+        XCTAssertEqual(history.current.noiseAnalysis, analysis)
+        history.redo()
+        XCTAssertEqual(history.current.detail.colorNoise, 40)
+        XCTAssertEqual(history.current.noiseAnalysis, analysis)
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let store = ProjectStore(directory: folder)
+        try store.save(history)
+        let loaded = try store.load(id: recipe.id)
+        XCTAssertEqual(loaded.current.noiseAnalysis, analysis)
+        XCTAssertEqual(loaded.current.detail.colorNoise, 40)
+        recipe.videoTrim.startSeconds = 2
+        XCTAssertFalse(identity.matches(recipe))
+        XCTAssertNil(RenderPlan(recipe: recipe).noiseAnalysis)
+    }
+
+    func testV4AutoUsesEffectiveGradeAndKeepsMaskProtectionLocal() {
+        let source = noisyEdgeImage()
+        var recipe = EditRecipe(sourcePath: "/tmp/noise.png", kind: .photo)
+        let identity = NoiseAnalysisIdentity(recipe: recipe, fileSize: 1, modificationTime: 1)
+        recipe.noiseAnalysis = NoiseAnalysis(identity: identity, chromaSigma: 0.015, luminanceSigma: 0.012,
+                                            confidence: 1, validTiles: 12, frameCount: 1)
+        var mask = EditMask(name: "Local lift", kind: .radial)
+        mask.center = NormalizedPoint(0.25, 0.5)
+        mask.radiusX = 0.25
+        mask.radiusY = 0.45
+        mask.adjustment[.exposure] = 1
+        recipe.masks = [mask]
+        let protected = CoreRenderer.protectV4(source, color: recipe.color, masks: recipe.masks,
+                                               detail: recipe.detail, analysis: recipe.noiseAnalysis)
+        let before = floatPixels(source), after = floatPixels(protected)
+        let inside = (32 * 128 + 32) * 4
+        let outside = (32 * 128 + 112) * 4
+        XCTAssertGreaterThan((0..<3).reduce(0.0) { $0 + abs(Double(after[inside + $1] - before[inside + $1])) }, 0.0001)
+        // The active CI kernel writes half-float output, so outside-mask pixels can round once.
+        for channel in 0..<4 { XCTAssertEqual(after[outside + channel], before[outside + channel], accuracy: 0.001) }
+        recipe.detail.autoProtection = false
+        XCTAssertTrue(CoreRenderer.protectV4(source, color: recipe.color, masks: recipe.masks,
+                                             detail: recipe.detail, analysis: recipe.noiseAnalysis) === source)
+        var easy = ColorState()
+        easy.setEasy { $0.light = 50 }
+        var manual = ColorState()
+        for parameter in Parameter.allCases {
+            manual.setEffective(parameter, to: easy.effective[parameter])
+        }
+        let a = NoiseProtection.demand(adjustment: easy.effective, detail: TechnicalDetail(), analysis: recipe.noiseAnalysis)
+        let b = NoiseProtection.demand(adjustment: manual.effective, detail: TechnicalDetail(), analysis: recipe.noiseAnalysis)
+        XCTAssertEqual(a.color, b.color)
+        XCTAssertEqual(a.luminance, b.luminance)
+    }
+
     private func v3Pixel(_ rgb: (Float, Float, Float), adjustments: [(Parameter, Double)], alpha: Float = 1) throws -> [Float] {
         let space = CGColorSpace(name: CGColorSpace.extendedLinearSRGB)!
         let sourceValues: [Float] = [rgb.0 * alpha, rgb.1 * alpha, rgb.2 * alpha, alpha]
@@ -165,15 +301,20 @@ final class CoreTests: XCTestCase {
         let colors: [(CGFloat, CGFloat, CGFloat)] = [(0.18, 0.18, 0.18), (0.06, 0.42, 0.11), (0.04, 0.35, 0.48)]
         let expected: [Int: [[UInt8]]] = [
             1: [[57, 60, 64, 255], [16, 157, 74, 255], [2, 149, 237, 255]],
-            2: [[49, 49, 51, 255], [3, 120, 54, 255], [1, 98, 143, 255]]
+            2: [[49, 49, 51, 255], [3, 120, 54, 255], [1, 98, 143, 255]],
+            3: [[53, 51, 49, 255], [0, 125, 59, 255], [5, 103, 144, 255]]
         ]
-        for version in [1, 2] {
+        for version in [1, 2, 3] {
             recipe.schemaVersion = version
             recipe.rendererVersion = version == 1 ? nil : version
+            var savedObject = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(recipe)) as? [String: Any])
+            savedObject.removeValue(forKey: "technicalDetail")
+            savedObject.removeValue(forKey: "noiseAnalysis")
+            let historical = try JSONDecoder().decode(EditRecipe.self, from: JSONSerialization.data(withJSONObject: savedObject))
             let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
             defer { try? FileManager.default.removeItem(at: folder) }
             let store = ProjectStore(directory: folder)
-            try store.save(EditHistory(recipe))
+            try store.save(EditHistory(historical))
             let reopened = try store.load(id: recipe.id).current
             let context = version == 1 ? contextV1 : contextV2
             for (index, (red, green, blue)) in colors.enumerated() {
@@ -188,12 +329,14 @@ final class CoreTests: XCTestCase {
     }
     func testRendererVersionDefaultsAndLegacyDecode() throws {
         let current = EditRecipe(sourcePath: "/tmp/source.jpg", kind: .photo)
-        XCTAssertEqual(current.schemaVersion, 3)
-        XCTAssertEqual(current.rendererVersion, 3)
+        XCTAssertEqual(current.schemaVersion, 4)
+        XCTAssertEqual(current.rendererVersion, 4)
         XCTAssertEqual(current.color.underwaterMappingVersion, 1)
         var object = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(current)) as? [String: Any])
         object.removeValue(forKey: "rendererVersion")
         object.removeValue(forKey: "sourceColor")
+        object.removeValue(forKey: "technicalDetail")
+        object.removeValue(forKey: "noiseAnalysis")
         object["schemaVersion"] = 1
         var legacy = try JSONDecoder().decode(EditRecipe.self, from: JSONSerialization.data(withJSONObject: object))
         XCTAssertNil(legacy.rendererVersion)

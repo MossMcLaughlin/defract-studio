@@ -172,10 +172,61 @@ public struct VideoTrim: Codable, Equatable, Sendable {
 
 public enum VideoCodec: String, Codable, Sendable { case h264, hevc }
 
+public struct TechnicalDetail: Codable, Equatable, Sendable {
+    public var version = 1
+    public var autoProtection = true
+    public var colorNoise = 0.0
+    public var luminanceNoise = 0.0
+    public init() {}
+}
+
+public struct NoiseAnalysisIdentity: Codable, Equatable, Sendable {
+    public var version = 1
+    public var sourcePath: String
+    public var fileSize: Int64
+    public var modificationTime: TimeInterval
+    public var sourceColor: SourceColorDescriptor?
+    public var trim: VideoTrim?
+
+    public init(recipe: EditRecipe, fileSize: Int64, modificationTime: TimeInterval) {
+        sourcePath = recipe.sourcePath
+        self.fileSize = fileSize
+        self.modificationTime = modificationTime
+        sourceColor = recipe.sourceColor
+        trim = recipe.kind == .video ? recipe.videoTrim : nil
+    }
+
+    public func matches(_ recipe: EditRecipe) -> Bool {
+        version == 1 && sourcePath == recipe.sourcePath
+            && sourceColor == recipe.sourceColor && trim == (recipe.kind == .video ? recipe.videoTrim : nil)
+    }
+}
+
+public struct NoiseAnalysis: Codable, Equatable, Sendable {
+    public var identity: NoiseAnalysisIdentity
+    public var chromaSigma: Double
+    public var luminanceSigma: Double
+    public var confidence: Double
+    public var validTiles: Int
+    public var frameCount: Int
+
+    public init(identity: NoiseAnalysisIdentity, chromaSigma: Double, luminanceSigma: Double,
+                confidence: Double, validTiles: Int, frameCount: Int) {
+        self.identity = identity
+        self.chromaSigma = chromaSigma
+        self.luminanceSigma = luminanceSigma
+        self.confidence = confidence
+        self.validTiles = validTiles
+        self.frameCount = frameCount
+    }
+}
+
 public struct EditRecipe: Codable, Equatable, Sendable {
     public var schemaVersion = 1
     public var rendererVersion: Int?
     public var sourceColor: SourceColorDescriptor?
+    public var technicalDetail: TechnicalDetail?
+    public var noiseAnalysis: NoiseAnalysis?
     public var id = UUID()
     public var sourcePath: String
     public var kind: MediaKind
@@ -192,19 +243,26 @@ public struct EditRecipe: Codable, Equatable, Sendable {
     public init(sourcePath: String, kind: MediaKind) {
         self.sourcePath = sourcePath
         self.kind = kind
-        self.schemaVersion = 3
-        self.rendererVersion = 3
+        self.schemaVersion = 4
+        self.rendererVersion = 4
+        self.technicalDetail = TechnicalDetail()
     }
 
     public var hasUnexportedEdits: Bool {
         let edited = easyIsEdited || !color.manualDelta.isNeutral || !masks.isEmpty
             || geometry != Geometry() || videoTrim != VideoTrim() || outputFrame != nil
+            || (rendererVersion ?? 1) >= 4 && (detail.colorNoise != 0 || detail.luminanceNoise != 0 || !detail.autoProtection)
         guard edited else { return false }
         guard let lastExportedAt else { return true }
         return lastModified > lastExportedAt
     }
 
     private var easyIsEdited: Bool { color.easy != EasySettings() }
+
+    public var detail: TechnicalDetail {
+        get { technicalDetail ?? TechnicalDetail() }
+        set { technicalDetail = newValue }
+    }
 }
 
 public struct EditHistory: Codable, Sendable {
@@ -216,11 +274,28 @@ public struct EditHistory: Codable, Sendable {
 
     public mutating func setSourceColor(_ descriptor: SourceColorDescriptor) {
         current.sourceColor = descriptor
+        current.noiseAnalysis = nil
         for index in undoStack.indices where undoStack[index].sourcePath == current.sourcePath {
             undoStack[index].sourceColor = descriptor
+            undoStack[index].noiseAnalysis = nil
         }
         for index in redoStack.indices where redoStack[index].sourcePath == current.sourcePath {
             redoStack[index].sourceColor = descriptor
+            redoStack[index].noiseAnalysis = nil
+        }
+    }
+
+    public mutating func setNoiseAnalysis(_ analysis: NoiseAnalysis?) {
+        current.noiseAnalysis = analysis
+        for index in undoStack.indices {
+            let applies = analysis.map { $0.identity.matches(undoStack[index]) }
+                ?? (undoStack[index].sourcePath == current.sourcePath)
+            if applies { undoStack[index].noiseAnalysis = analysis }
+        }
+        for index in redoStack.indices {
+            let applies = analysis.map { $0.identity.matches(redoStack[index]) }
+                ?? (redoStack[index].sourcePath == current.sourcePath)
+            if applies { redoStack[index].noiseAnalysis = analysis }
         }
     }
 

@@ -38,6 +38,9 @@ final class EditorModel: ObservableObject {
     private var subjectTask: Task<Data, Error>?
     private var exportTask: Task<Void, Never>?
     private var photoExportTask: Task<Void, Error>?
+    private var analysisTask: Task<NoiseAnalysis, Error>?
+    private var analysisRevision = 0
+    private var analysisRequestIdentity: NoiseAnalysisIdentity?
     private var previewSourcePath: String?
 
     init(store: ProjectStore? = nil) {
@@ -102,8 +105,12 @@ final class EditorModel: ObservableObject {
                       items[index].current.sourcePath == url.path,
                       items[index].current.sourceFileSize == expectedSize else { return }
                 items[index].setSourceColor(descriptor)
-                if draft?.id == id { draft?.sourceColor = descriptor }
+                if draft?.id == id {
+                    draft?.sourceColor = descriptor
+                    draft?.noiseAnalysis = nil
+                }
                 persist(index)
+                if selectedID == id { scheduleNoiseAnalysisIfNeeded() }
                 if descriptor.dynamicRange == .hlg || descriptor.dynamicRange == .pq {
                     error = "This HDR source needs a verified SDR conversion before editing or export."
                 }
@@ -114,11 +121,18 @@ final class EditorModel: ObservableObject {
     func select(_ id: UUID) {
         guard let history = items.first(where: { $0.current.id == id }) else { return }
         let changedSource = selectedID != id
+        if changedSource {
+            analysisTask?.cancel()
+            analysisTask = nil
+            analysisRequestIdentity = nil
+            analysisRevision += 1
+        }
         draft = history.current
         selectedMaskID = history.current.masks.first?.id
         cropEditing = false
         if changedSource { lastExportURL = nil; exportProgress = 0; previewSourcePath = nil }
         UserDefaults.standard.set(id.uuidString, forKey: "selectedMediaID")
+        scheduleNoiseAnalysisIfNeeded()
         refresh()
     }
 
@@ -128,15 +142,23 @@ final class EditorModel: ObservableObject {
     func endGesture() {
         if gestureStart != nil { commit() }
         gestureStart = nil
+        scheduleNoiseAnalysisIfNeeded()
         refresh()
     }
 
     func change(_ update: (inout EditRecipe) -> Void) {
         guard var recipe = draft else { return }
+        let previous = recipe
         update(&recipe)
+        let sourceChanged = recipe.sourcePath != previous.sourcePath || recipe.videoTrim != previous.videoTrim
+            || recipe.sourceColor != previous.sourceColor
+        if sourceChanged { recipe.noiseAnalysis = nil }
         draft = recipe
         refresh()
-        if gestureStart == nil { commit() }
+        if gestureStart == nil {
+            commit()
+            if sourceChanged { scheduleNoiseAnalysisIfNeeded() }
+        }
     }
 
     var selectedMask: EditMask? { draft?.masks.first { $0.id == selectedMaskID } }
@@ -230,6 +252,7 @@ final class EditorModel: ObservableObject {
         items[index].undo()
         draft = items[index].current
         persist(index)
+        scheduleNoiseAnalysisIfNeeded()
         refresh()
     }
 
@@ -238,12 +261,60 @@ final class EditorModel: ObservableObject {
         items[index].redo()
         draft = items[index].current
         persist(index)
+        scheduleNoiseAnalysisIfNeeded()
         refresh()
     }
 
     private func persist(_ index: Int) {
         do { try store.save(items[index]); autosaveFailed = false }
         catch { autosaveFailed = true; self.error = "Autosave failed; edits remain in memory. \(error.localizedDescription)" }
+    }
+
+    private func scheduleNoiseAnalysisIfNeeded() {
+        guard let recipe = draft, (recipe.rendererVersion ?? 1) >= 4 else { return }
+        if recipe.kind == .video && recipe.sourceColor == nil { return }
+        let url = URL(fileURLWithPath: recipe.sourcePath)
+        guard let identity = try? SourceNoiseAnalysis.identity(recipe: recipe, url: url) else { return }
+        if recipe.noiseAnalysis?.identity == identity { return }
+        if analysisRequestIdentity == identity { return }
+        analysisTask?.cancel()
+        analysisRevision += 1
+        let revision = analysisRevision
+        analysisRequestIdentity = identity
+        if recipe.noiseAnalysis != nil, let index = items.firstIndex(where: { $0.current.id == recipe.id }) {
+            items[index].setNoiseAnalysis(nil)
+            draft?.noiseAnalysis = nil
+            persist(index)
+        }
+        let work = Task.detached(priority: .utility) {
+            try await SourceNoiseAnalysis.analyze(url: url, recipe: recipe, identity: identity)
+        }
+        analysisTask = work
+        Task {
+            defer {
+                if analysisRevision == revision { analysisTask = nil; analysisRequestIdentity = nil }
+            }
+            do {
+                let result = try await work.value
+                guard analysisRevision == revision, selectedID == recipe.id,
+                      let index = items.firstIndex(where: { $0.current.id == recipe.id }),
+                      let activeDraft = draft,
+                      let draftIdentity = try? SourceNoiseAnalysis.identity(recipe: activeDraft, url: url),
+                      draftIdentity == identity,
+                      let currentIdentity = try? SourceNoiseAnalysis.identity(recipe: items[index].current, url: url),
+                      currentIdentity == identity else { return }
+                items[index].setNoiseAnalysis(result)
+                draft?.noiseAnalysis = result
+                persist(index)
+                refresh()
+            } catch is CancellationError {
+                return
+            } catch {
+                if analysisRevision == revision && selectedID == recipe.id {
+                    self.error = "Source noise analysis is unavailable; manual Detail controls remain usable. \(error.localizedDescription)"
+                }
+            }
+        }
     }
 
     func saveForClose() -> Bool {
@@ -269,7 +340,7 @@ final class EditorModel: ObservableObject {
             return
         }
         var renderRecipe = recipe
-        if showingOriginal { renderRecipe.color = ColorState(); renderRecipe.masks = [] }
+        if showingOriginal { renderRecipe.color = ColorState(); renderRecipe.masks = []; renderRecipe.detail = TechnicalDetail() }
         if cropEditing { renderRecipe.geometry = Geometry(); renderRecipe.outputFrame = nil }
         else if let exportPreviewFrame { renderRecipe.outputFrame = exportPreviewFrame }
         renderingRevision += 1

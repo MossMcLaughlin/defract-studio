@@ -46,8 +46,11 @@ struct EditorView: View {
             Button("OK") { model.error = nil }
             if model.draft != nil { Button("Relink…") { model.error = nil; model.relink() } }
         } message: { Text(model.error ?? "") }
-        .confirmationDialog("Reset all global color edits?", isPresented: $confirmReset) {
-            Button("Reset All", role: .destructive) { model.change { $0.color = ColorState() } }
+        .confirmationDialog("Reset all global adjustments?", isPresented: $confirmReset) {
+            Button("Reset All", role: .destructive) { model.change {
+                $0.color = ColorState()
+                if ($0.rendererVersion ?? 1) >= 4 { $0.detail = TechnicalDetail() }
+            } }
         }
         .onAppear { model.maskPanelActive = inspectorTab == "Masks"; model.refresh() }
         .sheet(isPresented: $model.exportSheetRequested) { ExportSheet(model: model) }
@@ -297,7 +300,7 @@ struct EditorView: View {
                         if model.kind != nil { cropInspector }
                         if inspectorMode == "Advanced" {
                             Divider().overlay(EditorTheme.divider)
-                            resetTextButton("Reset All Global Color…") { confirmReset = true }
+                            resetTextButton("Reset All Global Adjustments…") { confirmReset = true }
                         }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -477,7 +480,30 @@ struct EditorView: View {
             MixerBandPicker(selection: $selectedBand)
             let parameters = Array(Parameter.allCases.dropFirst(10))
             ForEach(parameters[(selectedBand * 3)..<(selectedBand * 3 + 3)], id: \.self) { parameter in advancedSlider(parameter, mixer: true) }
+            if (model.draft?.rendererVersion ?? 1) >= 4 {
+                Divider().overlay(EditorTheme.divider)
+                sectionHeader("Detail", help: "Reset Detail controls") { model.change { $0.detail = TechnicalDetail() } }
+                Toggle("Auto protection", isOn: Binding(
+                    get: { model.draft?.detail.autoProtection ?? true },
+                    set: { value in model.change { var detail = $0.detail; detail.autoProtection = value; $0.detail = detail } }
+                ))
+                .toggleStyle(.switch).help("Apply measured noise protection when the grade would reveal source noise.")
+                detailSlider("Color Noise", \.colorNoise)
+                detailSlider("Luminance Noise", \.luminanceNoise)
+                if model.draft?.noiseAnalysis == nil {
+                    Text("Auto protection is waiting for source analysis. Manual Detail controls work now.")
+                        .font(EditorTheme.helper).foregroundStyle(EditorTheme.secondaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
         }
+    }
+
+    private func detailSlider(_ title: String, _ key: WritableKeyPath<TechnicalDetail, Double>) -> some View {
+        InspectorSliderRow(title: title, value: String(format: "%.0f", model.draft?.detail[keyPath: key] ?? 0),
+                           selection: Binding(get: { model.draft?.detail[keyPath: key] ?? 0 }, set: { value in
+                model.change { var detail = $0.detail; detail[keyPath: key] = value.rounded(); $0.detail = detail }
+            }), range: 0...100, onEditingChanged: { editing in editing ? model.beginGesture() : model.endGesture() })
     }
 
     private func advancedSlider(_ parameter: Parameter, mixer: Bool = false) -> some View {

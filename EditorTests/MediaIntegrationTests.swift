@@ -31,6 +31,49 @@ final class MediaIntegrationTests: XCTestCase {
         return total / (64 * 3)
     }
 
+    func testRenderOnlyTimingSmoke() async throws {
+        let url = fixtures.appendingPathComponent("test_media/videos/GX011247.MP4")
+        let generator = AVAssetImageGenerator(asset: AVURLAsset(url: url))
+        generator.appliesPreferredTrackTransform = true
+        generator.maximumSize = CGSize(width: 1080, height: 1920)
+        let frame = try await generator.image(at: CMTime(seconds: 1, preferredTimescale: 600)).image
+        let source = CIImage(cgImage: frame)
+        let destination = CGColorSpace(name: CGColorSpace.sRGB)!
+        var recipe = EditRecipe(sourcePath: url.path, kind: .video)
+        recipe.color.setEasy { $0.waterColor = 50; $0.colorRecovery = 40 }
+        recipe.color.setEffective(.exposure, to: 0.25)
+        var mask = EditMask(name: "Water", kind: .radial)
+        mask.adjustment[.exposure] = 0.3
+        recipe.masks = [mask]
+        let context = MediaIO.context(for: recipe)
+        func measure(_ label: String, recipe: EditRecipe) {
+            var times: [Double] = []
+            for iteration in 0..<8 {
+                let start = CFAbsoluteTimeGetCurrent()
+                let graded = RenderPlan(recipe: recipe).grade(source)
+                let result = context.createCGImage(graded, from: graded.extent, format: .RGBA8, colorSpace: destination)
+                XCTAssertNotNil(result)
+                if iteration >= 2 { times.append((CFAbsoluteTimeGetCurrent() - start) * 1000) }
+            }
+            let sorted = times.sorted()
+            print("CP4_RENDER \(label) \(frame.width)x\(frame.height) median_ms=\(sorted[sorted.count / 2]) p95_ms=\(sorted.last!)")
+        }
+        recipe.schemaVersion = 3
+        recipe.rendererVersion = 3
+        measure("v3", recipe: recipe)
+        recipe.schemaVersion = 4
+        recipe.rendererVersion = 4
+        measure("v4_no_analysis", recipe: recipe)
+        let identity = try SourceNoiseAnalysis.identity(recipe: recipe, url: url)
+        recipe.noiseAnalysis = NoiseAnalysis(identity: identity, chromaSigma: 0.015, luminanceSigma: 0.012,
+                                            confidence: 1, validTiles: 16, frameCount: 3)
+        measure("v4_auto", recipe: recipe)
+        recipe.detail.autoProtection = false
+        recipe.detail.colorNoise = 60
+        recipe.detail.luminanceNoise = 25
+        measure("v4_manual", recipe: recipe)
+    }
+
     func testSourceColorDescriptorsUseMediaMetadata() async throws {
         let tenBit = fixtures.appendingPathComponent("test_media/videos/GX011247.MP4")
         let eightBit = fixtures.appendingPathComponent("test_media/videos/GX011123.MP4")
@@ -46,6 +89,24 @@ final class MediaIntegrationTests: XCTestCase {
         XCTAssertNotNil(still.profile)
     }
 
+    func testSourceNoiseAnalysisOnSuppliedPhotoAndGoPro() async throws {
+        for (path, kind) in [("test_media/photos/P8110319.JPG", MediaKind.photo),
+                             ("test_media/videos/GX011247.MP4", MediaKind.video)] {
+            let url = fixtures.appendingPathComponent(path)
+            var recipe = EditRecipe(sourcePath: url.path, kind: kind)
+            recipe.sourceColor = try await MediaIO.sourceColorDescriptor(url: url, kind: kind)
+            let identity = try SourceNoiseAnalysis.identity(recipe: recipe, url: url)
+            let result = try await SourceNoiseAnalysis.analyze(url: url, recipe: recipe, identity: identity)
+            XCTAssertEqual(result.identity, identity)
+            XCTAssertEqual(result.frameCount, kind == .photo ? 1 : 3)
+            XCTAssertGreaterThanOrEqual(result.validTiles, 5)
+            XCTAssertGreaterThan(result.confidence, 0)
+            XCTAssertTrue(result.chromaSigma.isFinite && result.luminanceSigma.isFinite)
+            XCTAssertTrue((0...1).contains(result.confidence))
+            print("CP4_ANALYSIS \(path) chroma=\(result.chromaSigma) luma=\(result.luminanceSigma) confidence=\(result.confidence) tiles=\(result.validTiles) frames=\(result.frameCount)")
+        }
+    }
+
     @MainActor func testImportedPhotoAndVideoInterpretationPersists() async throws {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: folder) }
@@ -55,18 +116,33 @@ final class MediaIntegrationTests: XCTestCase {
         let video = fixtures.appendingPathComponent("test_media/videos/GX011247.MP4")
         model.importURLs([photo, video])
         let photoRecipe = try XCTUnwrap(model.items.first { $0.current.sourcePath == photo.path }?.current)
-        XCTAssertEqual(photoRecipe.rendererVersion, 3)
+        XCTAssertEqual(photoRecipe.rendererVersion, 4)
         XCTAssertEqual(photoRecipe.sourceColor?.dynamicRange, .sdr)
         for _ in 0..<50 {
             if model.items.first(where: { $0.current.sourcePath == video.path })?.current.sourceColor != nil { break }
             try await Task.sleep(for: .milliseconds(100))
         }
         let videoRecipe = try XCTUnwrap(model.items.first { $0.current.sourcePath == video.path }?.current)
-        XCTAssertEqual(videoRecipe.rendererVersion, 3)
+        XCTAssertEqual(videoRecipe.rendererVersion, 4)
         XCTAssertEqual(videoRecipe.sourceColor?.sourceBitDepth, 10)
         XCTAssertEqual(videoRecipe.sourceColor?.dynamicRange, .sdr)
         XCTAssertEqual(try store.load(id: photoRecipe.id).current.sourceColor, photoRecipe.sourceColor)
         XCTAssertEqual(try store.load(id: videoRecipe.id).current.sourceColor, videoRecipe.sourceColor)
+        for _ in 0..<80 {
+            if model.items.first(where: { $0.current.id == videoRecipe.id })?.current.noiseAnalysis != nil { break }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        let analyzedVideo = try XCTUnwrap(model.items.first(where: { $0.current.id == videoRecipe.id })?.current.noiseAnalysis)
+        XCTAssertEqual(analyzedVideo.frameCount, 3)
+        XCTAssertEqual(try store.load(id: videoRecipe.id).current.noiseAnalysis, analyzedVideo)
+        model.select(photoRecipe.id)
+        for _ in 0..<80 {
+            if model.items.first(where: { $0.current.id == photoRecipe.id })?.current.noiseAnalysis != nil { break }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        let analyzedPhoto = try XCTUnwrap(model.items.first(where: { $0.current.id == photoRecipe.id })?.current.noiseAnalysis)
+        XCTAssertEqual(analyzedPhoto.frameCount, 1)
+        XCTAssertEqual(try store.load(id: photoRecipe.id).current.noiseAnalysis, analyzedPhoto)
     }
 
     func testNeutralV2PhotoMatchesLegacySDRBaseline() throws {
@@ -245,6 +321,8 @@ final class MediaIntegrationTests: XCTestCase {
         var recipe = EditRecipe(sourcePath: source.path, kind: .video)
         recipe.color.setEffective(.exposure, to: 0.25)
         recipe.color.setEffective(.saturation, to: 12)
+        recipe.detail.colorNoise = 60
+        recipe.detail.luminanceNoise = 25
         recipe.videoTrim.startSeconds = 0.3
         recipe.videoTrim.endSeconds = 2.5
         recipe.geometry.aspect = .fourFive
@@ -260,6 +338,9 @@ final class MediaIntegrationTests: XCTestCase {
         generator.maximumSize = CGSize(width: 128, height: 128)
         let previewFrame = try await generator.image(at: CMTime(seconds: 0.5, preferredTimescale: 600)).image
         XCTAssertGreaterThan(previewFrame.height, previewFrame.width)
+        _ = try await generator.image(at: CMTime(seconds: 1.5, preferredTimescale: 600)).image
+        let repeatedFrame = try await generator.image(at: CMTime(seconds: 0.5, preferredTimescale: 600)).image
+        XCTAssertLessThan(meanRGBDifference(previewFrame, repeatedFrame), 0.001)
         try await MediaIO.exportVideo(url: source, to: output, recipe: recipe)
         let exported = AVURLAsset(url: output)
         let outputDuration = try await exported.load(.duration).seconds
