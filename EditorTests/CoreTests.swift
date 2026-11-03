@@ -38,9 +38,160 @@ final class CoreTests: XCTestCase {
                        size: CGSize(width: width, height: height), format: .RGBAf, colorSpace: linearSpace)
     }
 
+    func testV5VisibilityStatePersistenceAndLegacyMapping() throws {
+        var recipe = EditRecipe(sourcePath: "/tmp/water.jpg", kind: .photo)
+        recipe.color.setEasy { $0.visibility = 50 }
+        XCTAssertEqual(recipe.color.base[.contrast], 4)
+        XCTAssertEqual(recipe.color.base[.blacks], -3)
+        XCTAssertEqual(recipe.color.base[.highlights], -2)
+        XCTAssertEqual(recipe.color.base[.clarity], 8)
+        XCTAssertEqual(recipe.color.base[.dehaze], 10)
+        recipe.color.setEffective(.clarity, to: 25)
+        recipe.color.setEffective(.dehaze, to: 30)
+        XCTAssertEqual(recipe.color.manualDelta[.clarity], 17)
+        XCTAssertEqual(recipe.color.manualDelta[.dehaze], 20)
+        let identity = NoiseAnalysisIdentity(recipe: recipe, fileSize: 100, modificationTime: 10)
+        let water = WaterAnalysis(red: 0.05, green: 0.2, blue: 0.3,
+                                  confidence: 0.75, samples: 80, frameCount: 1)
+        recipe.noiseAnalysis = NoiseAnalysis(identity: identity, chromaSigma: 0.003,
+                                            luminanceSigma: 0.002, confidence: 0.8,
+                                            validTiles: 10, frameCount: 1, water: water)
+        var history = EditHistory(recipe)
+        history.apply { $0.color.setEasy { $0.visibility = 100 } }
+        XCTAssertEqual(history.current.color.effective[.clarity], 33)
+        XCTAssertEqual(history.current.color.effective[.dehaze], 40)
+        history.undo()
+        XCTAssertEqual(history.current.color.effective[.clarity], 25)
+        history.redo()
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let store = ProjectStore(directory: folder)
+        try store.save(history)
+        let reopened = try store.load(id: recipe.id).current
+        XCTAssertEqual(reopened.color, history.current.color)
+        XCTAssertEqual(reopened.color.underwaterMappingVersion, 2)
+        XCTAssertEqual(reopened.noiseAnalysis?.water, water)
+        XCTAssertEqual(reopened.noiseAnalysis?.identity.version, 2)
+        var legacy = ColorState()
+        legacy.setEasy { $0.visibility = 100 }
+        XCTAssertEqual(legacy.effective[.contrast], 12)
+        XCTAssertEqual(legacy.effective[.clarity], 0)
+        XCTAssertEqual(legacy.effective[.dehaze], 0)
+    }
+
+    func testV5NeutralBypassAndWaterEstimator() {
+        let source = noisyEdgeImage()
+        var recipe = EditRecipe(sourcePath: "/tmp/water.jpg", kind: .photo)
+        XCTAssertTrue(RenderPlan(recipe: recipe).grade(source) === source)
+        let water = WaterAnalysis(red: 0.12, green: 0.25, blue: 0.34,
+                                  confidence: 1, samples: 200, frameCount: 1)
+        let identity = NoiseAnalysisIdentity(recipe: recipe, fileSize: 1, modificationTime: 1)
+        recipe.noiseAnalysis = NoiseAnalysis(identity: identity, chromaSigma: 0, luminanceSigma: 0,
+                                            confidence: 1, validTiles: 10, frameCount: 1, water: water)
+        XCTAssertTrue(RenderPlan(recipe: recipe).grade(source) === source)
+        var pixels = [Float](repeating: 0, count: 128 * 128 * 4)
+        for y in 0..<128 {
+            for x in 0..<128 {
+                let index = (y * 128 + x) * 4
+                pixels[index] = 0.12; pixels[index + 1] = 0.25
+                pixels[index + 2] = 0.34; pixels[index + 3] = 1
+            }
+        }
+        let estimate = WaterEstimator.frame(pixels, width: 128, height: 128)
+        XCTAssertNotNil(estimate)
+        XCTAssertEqual(estimate?.red ?? 0, 0.12, accuracy: 0.001)
+        XCTAssertGreaterThan(estimate?.confidence ?? 0, 0.5)
+        for index in stride(from: 0, to: pixels.count, by: 4) {
+            pixels[index] = 0.9; pixels[index + 1] = 0.9; pixels[index + 2] = 0.9
+        }
+        XCTAssertNil(WaterEstimator.frame(pixels, width: 128, height: 128))
+    }
+
+    func testV5ClarityDehazeAndMaskAreBounded() {
+        let width = 256, height = 128
+        var pixels = [Float](repeating: 0, count: width * height * 4)
+        for y in 0..<height {
+            for x in 0..<width {
+                let plate: Float = (72..<112).contains(x) && (32..<96).contains(y) ? 0.07 : 0
+                let grain = Float((x * 19 + y * 37) % 23) / 23000
+                let offset = (y * width + x) * 4
+                pixels[offset] = 0.10 + plate * 0.5 + grain
+                pixels[offset + 1] = 0.24 + plate + grain
+                pixels[offset + 2] = 0.34 + plate + grain
+                pixels[offset + 3] = x < 8 ? 0 : 1
+            }
+        }
+        let source = CIImage(bitmapData: pixels.withUnsafeBytes { Data($0) }, bytesPerRow: width * 16,
+                             size: CGSize(width: width, height: height), format: .RGBAf, colorSpace: linearSpace)
+        var recipe = EditRecipe(sourcePath: "/tmp/water.jpg", kind: .photo)
+        let water = WaterAnalysis(red: 0.13, green: 0.28, blue: 0.38,
+                                  confidence: 0.8, samples: 100, frameCount: 1)
+        let identity = NoiseAnalysisIdentity(recipe: recipe, fileSize: 1, modificationTime: 1)
+        recipe.noiseAnalysis = NoiseAnalysis(identity: identity, chromaSigma: 0.002, luminanceSigma: 0.001,
+                                            confidence: 1, validTiles: 12, frameCount: 1, water: water)
+        recipe.color.setEffective(.clarity, to: 60)
+        let clarity = floatPixels(RenderPlan(recipe: recipe).grade(source))
+        let original = floatPixels(source)
+        let edge = (64 * width + 72) * 4 + 1
+        let interior = (64 * width + 90) * 4 + 1
+        let outside = (64 * width + 65) * 4 + 1
+        XCTAssertTrue(clarity.allSatisfy(\.isFinite))
+        print("CP5_CLARITY edge=\(clarity[edge] - original[edge]) interior=\(clarity[interior] - original[interior]) outside=\(clarity[outside] - original[outside])")
+        XCTAssertGreaterThan(abs(clarity[edge] - original[edge]), 0.0001)
+        XCTAssertLessThan(abs(clarity[interior] - original[interior]), 0.005)
+        XCTAssertLessThan(abs(clarity[outside] - original[outside]), 0.01)
+        recipe.color.setEffective(.clarity, to: -60)
+        let softened = floatPixels(RenderPlan(recipe: recipe).grade(source))
+        XCTAssertLessThan(softened[edge] - original[edge], -0.0001)
+        recipe.color.setEffective(.clarity, to: 0)
+        recipe.color.setEffective(.contrast, to: 30)
+        let contrasted = floatPixels(RenderPlan(recipe: recipe).grade(source))
+        XCTAssertGreaterThan(abs(contrasted[interior] - original[interior]),
+                             abs(clarity[interior] - original[interior]) + 0.005)
+        recipe.color.setEffective(.contrast, to: 0)
+        recipe.color.setEffective(.dehaze, to: 50)
+        let dehazed = floatPixels(RenderPlan(recipe: recipe).grade(source))
+        XCTAssertTrue(dehazed.allSatisfy(\.isFinite))
+        XCTAssertGreaterThan(abs(dehazed[edge] - original[edge]), 0.0001)
+        XCTAssertLessThan(abs(dehazed[edge] - original[edge]), 0.2)
+        XCTAssertEqual(dehazed[(64 * width + 2) * 4 + 3], 0, accuracy: 0.001)
+        recipe.color.setEffective(.dehaze, to: 0)
+        var mask = EditMask(name: "Detail", kind: .radial)
+        mask.center = NormalizedPoint(0.35, 0.5)
+        mask.radiusX = 0.25; mask.radiusY = 0.4
+        mask.adjustment[.clarity] = 60
+        recipe.masks = [mask]
+        let local = floatPixels(RenderPlan(recipe: recipe).grade(source))
+        XCTAssertGreaterThan(abs(local[edge] - original[edge]), 0.0001)
+        let far = (64 * width + 220) * 4 + 1
+        XCTAssertEqual(local[far], original[far], accuracy: 0.001)
+
+        var gradientPixels = [Float](repeating: 0, count: 128 * 128 * 4)
+        for y in 0..<128 {
+            for x in 0..<128 {
+                let position = (y * 128 + x) * 4
+                let fraction = Float(x) / 127
+                gradientPixels[position] = 0.03
+                gradientPixels[position + 1] = 0.14 + 0.16 * fraction
+                gradientPixels[position + 2] = 0.30 + 0.20 * fraction
+                gradientPixels[position + 3] = 1
+            }
+        }
+        let gradientImage = CIImage(bitmapData: gradientPixels.withUnsafeBytes { Data($0) }, bytesPerRow: 128 * 16,
+                                    size: CGSize(width: 128, height: 128), format: .RGBAf, colorSpace: linearSpace)
+        recipe.masks = []
+        recipe.color.setEffective(.dehaze, to: 100)
+        let gradientOutput = floatPixels(RenderPlan(recipe: recipe).grade(gradientImage))
+        XCTAssertTrue(gradientOutput.allSatisfy { $0.isFinite && $0 >= -0.001 && $0 <= 1.001 })
+        let row = 64 * 128 * 4
+        XCTAssertLessThan(gradientOutput[row + 16 * 4 + 1], gradientOutput[row + 112 * 4 + 1])
+        XCTAssertLessThan(gradientOutput[row + 16 * 4 + 2], gradientOutput[row + 112 * 4 + 2])
+    }
+
     func testV4NeutralAndLegacyV3Bypass() {
         let source = noisyEdgeImage()
         var recipe = EditRecipe(sourcePath: "/tmp/noise.png", kind: .photo)
+        recipe.schemaVersion = 4; recipe.rendererVersion = 4; recipe.color = ColorState()
         XCTAssertTrue(RenderPlan(recipe: recipe).grade(source) === source)
         recipe.rendererVersion = 3
         recipe.detail.colorNoise = 100
@@ -54,6 +205,7 @@ final class CoreTests: XCTestCase {
     func testV4ManualNoiseReducesFlatChromaAndRetainsColorEdge() {
         let source = noisyEdgeImage()
         var recipe = EditRecipe(sourcePath: "/tmp/noise.png", kind: .photo)
+        recipe.schemaVersion = 4; recipe.rendererVersion = 4; recipe.color = ColorState()
         recipe.detail.autoProtection = false
         recipe.detail.colorNoise = 80
         recipe.detail.luminanceNoise = 30
@@ -82,6 +234,7 @@ final class CoreTests: XCTestCase {
 
     func testV4AnalysisPersistenceUndoAndInvalidation() throws {
         var recipe = EditRecipe(sourcePath: "/tmp/source.mov", kind: .video)
+        recipe.schemaVersion = 4; recipe.rendererVersion = 4; recipe.color = ColorState()
         let identity = NoiseAnalysisIdentity(recipe: recipe, fileSize: 100, modificationTime: 10)
         let analysis = NoiseAnalysis(identity: identity, chromaSigma: 0.01, luminanceSigma: 0.005,
                                      confidence: 0.8, validTiles: 10, frameCount: 3)
@@ -108,6 +261,7 @@ final class CoreTests: XCTestCase {
     func testV4AutoUsesEffectiveGradeAndKeepsMaskProtectionLocal() {
         let source = noisyEdgeImage()
         var recipe = EditRecipe(sourcePath: "/tmp/noise.png", kind: .photo)
+        recipe.schemaVersion = 4; recipe.rendererVersion = 4; recipe.color = ColorState()
         let identity = NoiseAnalysisIdentity(recipe: recipe, fileSize: 1, modificationTime: 1)
         recipe.noiseAnalysis = NoiseAnalysis(identity: identity, chromaSigma: 0.015, luminanceSigma: 0.012,
                                             confidence: 1, validTiles: 12, frameCount: 1)
@@ -293,6 +447,7 @@ final class CoreTests: XCTestCase {
         let contextV1 = CIContext(options: [.workingColorSpace: CGColorSpace(name: CGColorSpace.sRGB)!])
         let contextV2 = CIContext(options: [.workingColorSpace: CGColorSpace(name: CGColorSpace.extendedLinearSRGB)!, .workingFormat: CIFormat.RGBAh])
         var recipe = EditRecipe(sourcePath: "/tmp/color-reference.jpg", kind: .photo)
+        recipe.color = ColorState()
         recipe.color.setEffective(.exposure, to: 0.5)
         recipe.color.setEffective(.temperature, to: 18)
         recipe.color.setEffective(.contrast, to: 24)
@@ -302,9 +457,10 @@ final class CoreTests: XCTestCase {
         let expected: [Int: [[UInt8]]] = [
             1: [[57, 60, 64, 255], [16, 157, 74, 255], [2, 149, 237, 255]],
             2: [[49, 49, 51, 255], [3, 120, 54, 255], [1, 98, 143, 255]],
-            3: [[53, 51, 49, 255], [0, 125, 59, 255], [5, 103, 144, 255]]
+            3: [[53, 51, 49, 255], [0, 125, 59, 255], [5, 103, 144, 255]],
+            4: [[53, 51, 49, 255], [0, 125, 59, 255], [5, 103, 144, 255]]
         ]
-        for version in [1, 2, 3] {
+        for version in [1, 2, 3, 4] {
             recipe.schemaVersion = version
             recipe.rendererVersion = version == 1 ? nil : version
             var savedObject = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(recipe)) as? [String: Any])
@@ -329,10 +485,12 @@ final class CoreTests: XCTestCase {
     }
     func testRendererVersionDefaultsAndLegacyDecode() throws {
         let current = EditRecipe(sourcePath: "/tmp/source.jpg", kind: .photo)
-        XCTAssertEqual(current.schemaVersion, 4)
-        XCTAssertEqual(current.rendererVersion, 4)
-        XCTAssertEqual(current.color.underwaterMappingVersion, 1)
-        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(current)) as? [String: Any])
+        XCTAssertEqual(current.schemaVersion, 5)
+        XCTAssertEqual(current.rendererVersion, 5)
+        XCTAssertEqual(current.color.underwaterMappingVersion, 2)
+        var historical = current
+        historical.color = ColorState()
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(historical)) as? [String: Any])
         object.removeValue(forKey: "rendererVersion")
         object.removeValue(forKey: "sourceColor")
         object.removeValue(forKey: "technicalDetail")
@@ -366,6 +524,7 @@ final class CoreTests: XCTestCase {
         var transitional = EditRecipe(sourcePath: "/tmp/source.jpg", kind: .photo)
         transitional.schemaVersion = 2
         transitional.rendererVersion = 2
+        transitional.color = ColorState()
         var history = EditHistory(transitional)
         XCTAssertTrue(RenderPlan(recipe: history.current).grade(source) === source)
         history.apply { $0.color.setEffective(.exposure, to: 0.5) }
@@ -500,7 +659,7 @@ final class CoreTests: XCTestCase {
         func linear(_ encoded: Double) -> Double {
             encoded <= 0.04045 ? encoded / 12.92 : pow((encoded + 0.055) / 1.055, 2.4)
         }
-        for (index, parameter) in Parameter.allCases.enumerated() where parameter != .temperature && parameter != .tint {
+        for (index, parameter) in Parameter.allCases.prefix(34).enumerated() where parameter != .temperature && parameter != .tint {
             let sample: (Double, Double, Double)
             if index >= 10 {
                 let hue = hues[(index - 10) / 3] / 60

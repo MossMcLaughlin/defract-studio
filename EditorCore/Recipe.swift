@@ -11,8 +11,11 @@ public enum Parameter: String, CaseIterable, Codable, Hashable, Sendable {
     case blueHue, blueSaturation, blueLuminance
     case purpleHue, purpleSaturation, purpleLuminance
     case magentaHue, magentaSaturation, magentaLuminance
+    case clarity, dehaze
 
-    public var limits: ClosedRange<Double> { self == .exposure ? -3...3 : -100...100 }
+    public var limits: ClosedRange<Double> {
+        self == .exposure ? -3...3 : self == .dehaze ? 0...100 : -100...100
+    }
     public var title: String {
         rawValue.replacingOccurrences(of: "([a-z])([A-Z])", with: "$1 $2", options: .regularExpression).capitalized
     }
@@ -55,11 +58,11 @@ public struct ColorState: Codable, Equatable, Sendable {
     public private(set) var effective = AdjustmentVector()
     public var underwaterMappingVersion = 1
 
-    public init() {}
+    public init(mappingVersion: Int = 1) { underwaterMappingVersion = mappingVersion }
 
     public mutating func setEasy(_ update: (inout EasySettings) -> Void) {
         update(&easy)
-        base = EasyMapping.evaluate(easy)
+        base = EasyMapping.evaluate(easy, version: underwaterMappingVersion)
         effective = base.adding(manualDelta, clamp: true)
     }
 
@@ -107,9 +110,13 @@ public enum EasyMapping {
         (50, [.exposure: 0.35, .contrast: 2, .highlights: -5, .shadows: 9, .whites: 1]),
         (100, [.exposure: 0.8, .contrast: 4, .highlights: -12, .shadows: 18, .whites: 2])
     ]
-    private static let visibility: [Knot] = [
+    private static let visibilityV1: [Knot] = [
         (0, [:]), (50, [.contrast: 6, .blacks: -4, .highlights: -2]),
         (100, [.contrast: 12, .blacks: -8, .highlights: -4])
+    ]
+    private static let visibilityV2: [Knot] = [
+        (0, [:]), (50, [.contrast: 4, .blacks: -3, .highlights: -2, .clarity: 8, .dehaze: 10]),
+        (100, [.contrast: 8, .blacks: -5, .highlights: -4, .clarity: 16, .dehaze: 20])
     ]
 
     private static func interpolate(_ value: Double, knots: [Knot]) -> AdjustmentVector {
@@ -127,11 +134,11 @@ public enum EasyMapping {
         return vector
     }
 
-    public static func evaluate(_ easy: EasySettings) -> AdjustmentVector {
+    public static func evaluate(_ easy: EasySettings, version: Int = 1) -> AdjustmentVector {
         interpolate(easy.waterColor, knots: water)
             .adding(interpolate(easy.colorRecovery, knots: recovery))
             .adding(interpolate(easy.light, knots: light))
-            .adding(interpolate(easy.visibility, knots: visibility))
+            .adding(interpolate(easy.visibility, knots: version >= 2 ? visibilityV2 : visibilityV1))
     }
 }
 
@@ -189,6 +196,7 @@ public struct NoiseAnalysisIdentity: Codable, Equatable, Sendable {
     public var trim: VideoTrim?
 
     public init(recipe: EditRecipe, fileSize: Int64, modificationTime: TimeInterval) {
+        version = (recipe.rendererVersion ?? 1) >= 5 ? 2 : 1
         sourcePath = recipe.sourcePath
         self.fileSize = fileSize
         self.modificationTime = modificationTime
@@ -197,7 +205,7 @@ public struct NoiseAnalysisIdentity: Codable, Equatable, Sendable {
     }
 
     public func matches(_ recipe: EditRecipe) -> Bool {
-        version == 1 && sourcePath == recipe.sourcePath
+        version == ((recipe.rendererVersion ?? 1) >= 5 ? 2 : 1) && sourcePath == recipe.sourcePath
             && sourceColor == recipe.sourceColor && trim == (recipe.kind == .video ? recipe.videoTrim : nil)
     }
 }
@@ -209,15 +217,17 @@ public struct NoiseAnalysis: Codable, Equatable, Sendable {
     public var confidence: Double
     public var validTiles: Int
     public var frameCount: Int
+    public var water: WaterAnalysis?
 
     public init(identity: NoiseAnalysisIdentity, chromaSigma: Double, luminanceSigma: Double,
-                confidence: Double, validTiles: Int, frameCount: Int) {
+                confidence: Double, validTiles: Int, frameCount: Int, water: WaterAnalysis? = nil) {
         self.identity = identity
         self.chromaSigma = chromaSigma
         self.luminanceSigma = luminanceSigma
         self.confidence = confidence
         self.validTiles = validTiles
         self.frameCount = frameCount
+        self.water = water
     }
 }
 
@@ -243,8 +253,9 @@ public struct EditRecipe: Codable, Equatable, Sendable {
     public init(sourcePath: String, kind: MediaKind) {
         self.sourcePath = sourcePath
         self.kind = kind
-        self.schemaVersion = 4
-        self.rendererVersion = 4
+        self.schemaVersion = 5
+        self.rendererVersion = 5
+        self.color = ColorState(mappingVersion: 2)
         self.technicalDetail = TechnicalDetail()
     }
 

@@ -63,13 +63,19 @@ struct MaskInspector: View {
                     Divider().overlay(EditorTheme.divider)
                     localHeader("Local Light", parameters: [.exposure, .contrast, .highlights, .shadows, .whites, .blacks])
                     ForEach([Parameter.exposure, .contrast, .highlights, .shadows, .whites, .blacks], id: \.self) { localSlider($0) }
+                    if (model.draft?.rendererVersion ?? 1) >= 5 {
+                        localHeader("Local Clarity", parameters: [.clarity])
+                        localSlider(.clarity)
+                        Text("Dehaze uses a whole-scene water estimate and is available in Global.")
+                            .font(EditorTheme.helper).foregroundStyle(EditorTheme.secondaryText)
+                    }
                     Divider().overlay(EditorTheme.divider)
                     localHeader("Local Color", parameters: [.temperature, .tint, .saturation, .vibrance])
                     ForEach([Parameter.temperature, .tint, .saturation, .vibrance], id: \.self) { localSlider($0) }
                     Divider().overlay(EditorTheme.divider)
-                    localHeader("Local Color Mixer", parameters: Array(Parameter.allCases.dropFirst(10)))
+                    localHeader("Local Color Mixer", parameters: Array(Parameter.allCases.dropFirst(10).prefix(24)))
                     MixerBandPicker(selection: $selectedBand)
-                    let parameters = Array(Parameter.allCases.dropFirst(10))
+                    let parameters = Array(Parameter.allCases.dropFirst(10).prefix(24))
                     ForEach(parameters[(selectedBand * 3)..<(selectedBand * 3 + 3)], id: \.self) { localSlider($0, mixer: true) }
                 } else {
                     Text("Add a mask to adjust part of the image.").font(EditorTheme.helper).foregroundStyle(EditorTheme.secondaryText)

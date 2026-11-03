@@ -15,11 +15,14 @@ enum SourceNoiseAnalysis {
 
     static func analyze(url: URL, recipe: EditRecipe, identity: NoiseAnalysisIdentity) async throws -> NoiseAnalysis {
         var tiles: [NoiseEstimator.Tile] = []
+        var waterFrames: [WaterEstimator.Frame] = []
         var frameCount = 0
         if recipe.kind == .photo {
             try Task.checkCancellation()
             let source = try MediaIO.photoImage(url: url)
-            tiles += try analyzeFrame(source)
+            let result = try analyzeFrame(source, includeWater: (recipe.rendererVersion ?? 1) >= 5)
+            tiles += result.tiles
+            if let water = result.water { waterFrames.append(water) }
             frameCount = 1
         } else {
             let asset = AVURLAsset(url: url)
@@ -33,17 +36,22 @@ enum SourceNoiseAnalysis {
                 try Task.checkCancellation()
                 let second = start + (end - start) * fraction
                 let image = try await generator.image(at: CMTime(seconds: second, preferredTimescale: 600)).image
-                tiles += try analyzeFrame(CIImage(cgImage: image))
+                let result = try analyzeFrame(CIImage(cgImage: image), includeWater: (recipe.rendererVersion ?? 1) >= 5)
+                tiles += result.tiles
+                if let water = result.water { waterFrames.append(water) }
                 frameCount += 1
             }
         }
         try Task.checkCancellation()
-        return NoiseEstimator.summarize(tiles, identity: identity, frameCount: frameCount)
+        var summary = NoiseEstimator.summarize(tiles, identity: identity, frameCount: frameCount)
+        if (recipe.rendererVersion ?? 1) >= 5 { summary.water = WaterEstimator.summarize(waterFrames) }
+        return summary
     }
 
-    private static func analyzeFrame(_ source: CIImage) throws -> [NoiseEstimator.Tile] {
+    private static func analyzeFrame(_ source: CIImage, includeWater: Bool) throws
+        -> (tiles: [NoiseEstimator.Tile], water: WaterEstimator.Frame?) {
         let extent = source.extent.integral
-        guard extent.width >= 128, extent.height >= 128 else { return [] }
+        guard extent.width >= 128, extent.height >= 128 else { return ([], nil) }
         let scale = min(1, 1024 / max(extent.width, extent.height))
         let width = max(1, Int((extent.width * scale).rounded()))
         let height = max(1, Int((extent.height * scale).rounded()))
@@ -57,6 +65,7 @@ enum SourceNoiseAnalysis {
                            bounds: CGRect(x: 0, y: 0, width: width, height: height),
                            format: .RGBAf, colorSpace: space)
         }
+        let water = includeWater ? WaterEstimator.frame(pixels, width: width, height: height) : nil
         func sample(_ x: Int, _ y: Int) -> (Double, Double) {
             let offset = (min(height - 1, max(0, y)) * width + min(width - 1, max(0, x))) * 4
             let alpha = Double(pixels[offset + 3])
@@ -90,6 +99,6 @@ enum SourceNoiseAnalysis {
             }
             if let estimate = NoiseEstimator.tile(tile, width: 128, height: 128) { estimates.append(estimate) }
         }
-        return estimates
+        return (estimates, water)
     }
 }

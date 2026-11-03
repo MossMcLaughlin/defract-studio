@@ -31,6 +31,8 @@ public struct RenderPlan: Sendable {
     public func grade(_ source: CIImage) -> CIImage {
         if version <= 2 { return CoreRenderer.render(source, color: color, masks: masks) }
         if version == 3 { return CoreRenderer.renderV3(source, color: color, masks: masks) }
+        if version >= 5 { return CoreRenderer.renderV5(source, color: color, masks: masks,
+                                                        detail: detail, analysis: noiseAnalysis) }
         let protected = CoreRenderer.protectV4(source, color: color, masks: masks,
                                                detail: detail, analysis: noiseAnalysis)
         return CoreRenderer.renderV3(protected, color: color, masks: masks)

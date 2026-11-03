@@ -2,7 +2,7 @@
 
 ## Core rule
 
-New imports store schema/renderer version 4 and source-color evidence. Saved renderer 1, transitional renderer 2, and renderer 3 projects retain their original appearance; they are never migrated automatically. Renderers 2–4 use an extended-linear-sRGB RGBAh Core Image working context. Renderer 4 preserves renderer 3's creative math and Easy mapping v1, adding source protection before the grade. HDR/Log normalization and export precision upgrades remain outside this version.
+New imports store schema/renderer version 5 and source-color evidence. Saved renderers 1–4 retain their original appearance and Easy mapping; they are never migrated automatically. Renderers 2–5 use an extended-linear-sRGB RGBAh Core Image working context. Renderer 5 retains renderer 3's color math and renderer 4's source protection, adding spatial Visibility effects. HDR/Log normalization and export precision upgrades remain outside this version.
 
 Renderer 3 applies native `CITemperatureAndTint` in the linear working context, with the target-neutral direction inverted so positive Temperature warms and positive Tint moves magenta. The zero vector bypasses the filter. Exposure multiplies straight linear RGB by `2^EV` without intermediate clipping. A 4096-sample log-luminance tone curve uses an 18% gray pivot and Gaussian light-control lobes; pool-adjacent-violators projection enforces at least 0.05 log-space slope under opposing extreme settings. Its luminance gain is smoothly limited to 0.125...8.
 
@@ -10,9 +10,11 @@ The mixer selects eight overlapping hue bands from a bounded encoded-sRGB proxy,
 
 Renderer 4 samples an upright, ungraded source with a bounded 1024-pixel overview and up to twelve native-size 128×128 tiles per frame. Video uses three fixed positions within the selected trim. A 2×2 Haar/MAD proxy in signed encoded-sRGB opponent channels estimates chroma and luminance noise; too few usable tiles yields zero Auto confidence. The compact result is tied to file size, modification time, interpretation, trim, and analysis version. Auto demand uses this evidence and the final effective grade, including enabled local masks. At zero demand the protection stage returns the source image without launching its Metal kernel. Otherwise one 5×5 joint bilateral pass applies a combined source-aligned field, with separate Color Noise and Luminance Noise strengths. The provisional Auto evidence ramp is 0.002–0.015; manual Detail controls range 0–100, and Auto off leaves manual values authoritative. These are engineering estimates, not camera calibrations.
 
+Renderer 5 extends the same source analysis snapshot with a bounded overview estimate of smooth blue/green water, rejecting clipped, dark, textured, and low-chroma candidates. The robust median water color and confidence are fixed across three sampled video frames and tied to source interpretation and trim through analysis identity version 2. Dehaze runs before creative color math: a small blurred transmission proxy applies a confidence-gated, scalar, bounded veiling-light correction (`t ≥ 0.60`), with weaker treatment in smooth water and bright/dark regions. Clarity runs after global creative math: a quarter-resolution log-luminance input and full-resolution guide drive Core Image's guided filter; a Metal kernel applies bounded signed detail gain, with noise-floor and tonal gates. Both effects bypass spatial work at zero. Local Clarity is available in masks; Dehaze is Global only because its water estimate is scene-wide. All constants are provisional visual estimates, not calibrated restoration or recovered scene depth.
+
 There is **one actual set of color adjustments**. Easy slider coordinates contribute a deterministic `base` vector; Advanced edits contribute a `manualDelta` vector. The renderer and Advanced UI use `effective = clamp(base + manualDelta, parameterAllowedRange)`. The stored, unclamped delta remains intact to allow reversal of an Easy change; numeric Advanced controls show the **clamped rendered value**. A new Advanced target sets `manualDelta = requestedEffective - currentBase`. Switching tabs never changes results. Store Easy controls + manual deltas + masks; don't overwrite manual values on Easy movement.
 
-All Easy parameters start at neutral. Each Easy component should derive from its absolute slider position, **not accumulate incremental floating-point changes**. Contribution vectors add together so overlapping edits remain predictable. Map formulas versioned as `underwaterMappingVersion: 1` in the saved recipe, permitting later recalibration/migration; saved project output must not suddenly change when a new mapping is installed (persist evaluated base or a versioned mapping implementation).
+All Easy parameters start at neutral. Each Easy component derives from its absolute slider position, **not accumulated incremental floating-point changes**. Contribution vectors add together so overlapping edits remain predictable. Historical projects keep `underwaterMappingVersion: 1`; new v5 imports use version 2. Both mappings remain executable, and saved projects are never silently recalculated under the new mapping.
 
 ## Canonical Advanced controls
 
@@ -20,12 +22,13 @@ All Easy parameters start at neutral. Each Easy component should derive from its
 - **Color:** `Temperature` (−100 cool / +100 warm), `Tint` (−100 green / +100 magenta), `Saturation`, `Vibrance` each −100...+100 (0).
 - **HSL Color Mixer:** 8 overlapping hue bands: Red (0°), Orange (30°), Yellow (60°), Green (120°), Aqua (180°), Blue (240°), Purple (275°), Magenta (320°). Each has `Hue` (−100...+100 mapped to ±45° maximum), `Saturation` and `Luminance` (−100...+100). HSL selective effect uses smooth hue-region weights with wraparound, not hard cutoffs or arbitrary discrete colors. Design the mixer so raising Green Hue shifts green **toward aqua/blue**, raising Aqua Hue shifts aqua toward blue, and neighboring channels blend smoothly. Preserve meaningful hue responses at very low saturation; do not create severe banding. Use color chips and readable labels; no color wheel required.
 - **Detail (renderer 4):** Auto protection on by default, Color Noise 0–100 (0), Luminance Noise 0–100 (0). Sharpening remains unimplemented and hidden.
+- **Visibility (renderer 5):** Clarity −100...+100 (0), Dehaze 0...100 (0); local masks expose Clarity only.
 - Numeric UI uses normalized integers for colors; Exposure may show two decimals. Actual algorithms need not match Adobe. Every active control must have a visible, monotone, reasonably standard effect and testable neutral=identity.
-- Optional later: Clarity, sharpening, real dehaze, auto white balance, finer channels. **Don't render dead controls**; if a feature is not implemented, omit it rather than falsely exposing it.
+- Optional later: sharpening, auto white balance, finer channels. **Don't render dead controls**; if a feature is not implemented, omit it rather than falsely exposing it.
 
 ## Standard processing model (implement once)
 
-`Decode and orient original → honor profile/transfer → working-space conversion → renderer-4 source protection when demanded → global white balance/exposure → global tone (contrast/highlights/shadows/whites/blacks) → global mixer + saturation/vibrance → each enabled mask's local edit transform composed through its alpha mask in saved order → crop/rotate → display/output transform.`
+`Decode and orient original → honor profile/transfer → working-space conversion → source protection when demanded → renderer-5 Dehaze when requested → global white balance/exposure → global tone (contrast/highlights/shadows/whites/blacks) → global mixer + saturation/vibrance → renderer-5 Clarity when requested → each enabled mask's local edit and Clarity through its alpha mask in saved order → crop/rotate → display/output transform.`
 
 White balance should be chromatically sensible, ideally using known Core Image temperature/tint support rather than naive RGB channel multiplication; use per-channel adjustment with safeguards only if needed. Exposure should act in linear light. Tonal edits should preserve continuity and avoid hard clipping; implement highlights/shadows/whites/blacks using a well-documented, smooth tone operator or common Core Image tools, with 0=identity, signed adjustments, bounded gains and stable end values. Contrast is a pivoted S-curve rather than uniformly multiplying brightness. HSL is best performed in a perceptually suitable encoded representation, with conversion to/from the working space handled explicitly. Vibrance preferentially increases low-saturation colors and protects highly saturated colors/skin as practical. Do not perform per-color hue shifts using unfeathered, discontinuous bins.
 
@@ -38,7 +41,7 @@ Initial sliders, saved as integers:
 1. **Water Color**: `−100 ... +100`, neutral `0`. **Asymmetric**: negative = “Deepen Blue / reduce excess cyan” (never deliberately add green); positive = “Remove Green” (warm/magenta balance, green→aqua, aqua→blue, restrained green desaturation and blue emphasis). UI labels at endpoints and a centered neutral tick. This is *not* Blue↔Green symmetric white balance.
 2. **Color Recovery**: `0 ... 100`, neutral `0`, mild red/orange/yellow + vibrance/saturation recovery; preserve sand/skin where possible; don't amplify clipped/noisy red data excessively.
 3. **Light**: `−100 ... +100`, neutral `0`, negative for darker, more subject-focused background; positive to brighten dark exposure while lifting shadows and protecting highlights.
-4. **Visibility**: `0 ... 100`, neutral `0`, mild contrast/black-level adjustment; no promise to reverse scattering, no fake dehaze.
+4. **Visibility**: `0 ... 100`, neutral `0`; v1 mapping uses contrast/black-level adjustment, while v2 adds restrained Clarity and Dehaze. Neither mapping promises to recover scene depth or lost wavelengths.
 
 Each slider maps to **all named relevant Advanced controls**, not to a separate invisible effect. These *provisional*, deliberately conservative lookup knots are specified below; values are **Advanced UI units** except Exposure (EV). Omitted parameters = 0. Use piecewise-linear interpolation between knot values for v1; fit smooth monotone splines only after user-led color testing. This avoids an expensive/fragile curve-fitting system before we have sample target grades.
 
@@ -84,7 +87,13 @@ Negative end darkens an open-water background or washed-out scene without drasti
 | 50 | +6 | −4 | −2 |
 | 100 | +12 | −8 | −4 |
 
-This is effectively “clarity/contrast correction,” not physical visibility estimation or dehazing. No local frequency-based clarity implementation is required for v1. The fourth slider is retained because contrast/backscatter characteristics vary independently from water color and brightness. If it proves redundant in real testing, it may be simplified in v2.
+This table remains the **v1 historical mapping**. New v5 recipes use `underwaterMappingVersion: 2` with the provisional knots below; no separate hidden Visibility filter runs.
+
+| Easy | Contrast | Blacks | Highlights | Clarity | Dehaze |
+|---:|---:|---:|---:|---:|---:|
+| 0 | 0 | 0 | 0 | 0 | 0 |
+| 50 | +4 | −3 | −2 | +8 | +10 |
+| 100 | +8 | −5 | −4 | +16 | +20 |
 
 ## Correctness and behavior tests
 

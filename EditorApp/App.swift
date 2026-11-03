@@ -48,7 +48,7 @@ struct EditorView: View {
         } message: { Text(model.error ?? "") }
         .confirmationDialog("Reset all global adjustments?", isPresented: $confirmReset) {
             Button("Reset All", role: .destructive) { model.change {
-                $0.color = ColorState()
+                $0.color = ColorState(mappingVersion: $0.color.underwaterMappingVersion)
                 if ($0.rendererVersion ?? 1) >= 4 { $0.detail = TechnicalDetail() }
             } }
         }
@@ -476,10 +476,18 @@ struct EditorView: View {
             sectionHeader("Color", help: "Reset manual Color adjustments") { model.change { $0.color.resetManual([.temperature, .tint, .saturation, .vibrance]) } }
             ForEach([Parameter.temperature, .tint, .saturation, .vibrance], id: \.self) { parameter in advancedSlider(parameter) }
             Divider().overlay(EditorTheme.divider)
-            sectionHeader("Color Mixer", help: "Reset all manual Color Mixer adjustments") { model.change { $0.color.resetManual(Array(Parameter.allCases.dropFirst(10))) } }
+            sectionHeader("Color Mixer", help: "Reset all manual Color Mixer adjustments") { model.change { $0.color.resetManual(Array(Parameter.allCases.dropFirst(10).prefix(24))) } }
             MixerBandPicker(selection: $selectedBand)
-            let parameters = Array(Parameter.allCases.dropFirst(10))
+            let parameters = Array(Parameter.allCases.dropFirst(10).prefix(24))
             ForEach(parameters[(selectedBand * 3)..<(selectedBand * 3 + 3)], id: \.self) { parameter in advancedSlider(parameter, mixer: true) }
+            if (model.draft?.rendererVersion ?? 1) >= 5 {
+                Divider().overlay(EditorTheme.divider)
+                sectionHeader("Visibility", help: "Reset manual Visibility adjustments") {
+                    model.change { $0.color.resetManual([.clarity, .dehaze]) }
+                }
+                advancedSlider(.clarity)
+                advancedSlider(.dehaze)
+            }
             if (model.draft?.rendererVersion ?? 1) >= 4 {
                 Divider().overlay(EditorTheme.divider)
                 sectionHeader("Detail", help: "Reset Detail controls") { model.change { $0.detail = TechnicalDetail() } }

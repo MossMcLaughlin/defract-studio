@@ -9,7 +9,8 @@ public enum NoiseProtection {
     }
 
     public static func demand(adjustment: AdjustmentVector, detail: TechnicalDetail,
-                              analysis: NoiseAnalysis?, includeManual: Bool = true) -> (color: Double, luminance: Double) {
+                              analysis: NoiseAnalysis?, includeManual: Bool = true,
+                              includeVisibilityStress: Bool = false) -> (color: Double, luminance: Double) {
         let manualColor = includeManual ? clamp(detail.colorNoise / 100) : 0
         let manualLuminance = includeManual ? clamp(detail.luminanceNoise / 100) : 0
         guard detail.autoProtection, !adjustment.isNeutral, let analysis, analysis.confidence > 0 else {
@@ -20,7 +21,8 @@ public enum NoiseProtection {
         let stress = clamp(max(0, adjustment[.exposure]) / 2 + max(0, adjustment[.shadows]) / 100
             + 0.5 * max(0, adjustment[.temperature]) / 100
             + max(0, adjustment[.saturation]) / 100 + max(0, adjustment[.vibrance]) / 100
-            + bandSaturation)
+            + bandSaturation + (includeVisibilityStress
+                ? max(0, adjustment[.dehaze]) / 100 + 0.5 * abs(adjustment[.clarity]) / 100 : 0))
         let confidence = clamp(analysis.confidence)
         let colorEvidence = smooth((analysis.chromaSigma - 0.002) / 0.013)
         let lumaEvidence = smooth((analysis.luminanceSigma - 0.002) / 0.013)
@@ -132,14 +134,17 @@ private enum NoiseRenderer {
 
 public extension CoreRenderer {
     static func protectV4(_ source: CIImage, color: ColorState, masks: [EditMask],
-                          detail: TechnicalDetail, analysis: NoiseAnalysis?) -> CIImage {
-        let global = NoiseProtection.demand(adjustment: color.effective, detail: detail, analysis: analysis)
+                          detail: TechnicalDetail, analysis: NoiseAnalysis?,
+                          includeVisibilityStress: Bool = false) -> CIImage {
+        let global = NoiseProtection.demand(adjustment: color.effective, detail: detail, analysis: analysis,
+                                             includeVisibilityStress: includeVisibilityStress)
         var maximumColor = global.color
         var maximumLuminance = global.luminance
         var localDemands: [(EditMask, Double, Double)] = []
         for mask in masks where mask.enabled && !mask.adjustment.isNeutral {
             let local = NoiseProtection.demand(adjustment: mask.adjustment, detail: detail,
-                                                analysis: analysis, includeManual: false)
+                                                analysis: analysis, includeManual: false,
+                                                includeVisibilityStress: includeVisibilityStress)
             if local.color > 0 || local.luminance > 0 {
                 maximumColor = max(maximumColor, local.color)
                 maximumLuminance = max(maximumLuminance, local.luminance)

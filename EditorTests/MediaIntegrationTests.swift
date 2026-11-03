@@ -40,6 +40,7 @@ final class MediaIntegrationTests: XCTestCase {
         let source = CIImage(cgImage: frame)
         let destination = CGColorSpace(name: CGColorSpace.sRGB)!
         var recipe = EditRecipe(sourcePath: url.path, kind: .video)
+        recipe.color = ColorState()
         recipe.color.setEasy { $0.waterColor = 50; $0.colorRecovery = 40 }
         recipe.color.setEffective(.exposure, to: 0.25)
         var mask = EditMask(name: "Water", kind: .radial)
@@ -56,7 +57,7 @@ final class MediaIntegrationTests: XCTestCase {
                 if iteration >= 2 { times.append((CFAbsoluteTimeGetCurrent() - start) * 1000) }
             }
             let sorted = times.sorted()
-            print("CP4_RENDER \(label) \(frame.width)x\(frame.height) median_ms=\(sorted[sorted.count / 2]) p95_ms=\(sorted.last!)")
+            print("CP5_RENDER \(label) \(frame.width)x\(frame.height) iterations=\(sorted.count) median_ms=\(sorted[sorted.count / 2]) p95_ms=\(sorted.last!)")
         }
         recipe.schemaVersion = 3
         recipe.rendererVersion = 3
@@ -72,6 +73,30 @@ final class MediaIntegrationTests: XCTestCase {
         recipe.detail.colorNoise = 60
         recipe.detail.luminanceNoise = 25
         measure("v4_manual", recipe: recipe)
+        recipe.schemaVersion = 5
+        recipe.rendererVersion = 5
+        recipe.color = ColorState(mappingVersion: 2)
+        recipe.color.setEasy { $0.waterColor = 50; $0.colorRecovery = 40 }
+        recipe.color.setEffective(.exposure, to: 0.25)
+        recipe.detail.autoProtection = true
+        recipe.detail.colorNoise = 0
+        recipe.detail.luminanceNoise = 0
+        let v5Identity = try SourceNoiseAnalysis.identity(recipe: recipe, url: url)
+        recipe.noiseAnalysis = NoiseAnalysis(identity: v5Identity, chromaSigma: 0.015, luminanceSigma: 0.012,
+                                            confidence: 1, validTiles: 16, frameCount: 3,
+                                            water: WaterAnalysis(red: 0.12, green: 0.25, blue: 0.34,
+                                                                 confidence: 0.8, samples: 150, frameCount: 3))
+        measure("v5_neutral", recipe: recipe)
+        recipe.color.setEasy { $0.visibility = 50 }
+        measure("v5_mild", recipe: recipe)
+        recipe.color.setEasy { $0.visibility = 0 }
+        recipe.color.setEffective(.clarity, to: 60)
+        recipe.color.setEffective(.dehaze, to: 50)
+        measure("v5_strong", recipe: recipe)
+        recipe.detail.autoProtection = false
+        recipe.detail.colorNoise = 60
+        recipe.detail.luminanceNoise = 25
+        measure("v5_combined_noise", recipe: recipe)
     }
 
     func testSourceColorDescriptorsUseMediaMetadata() async throws {
@@ -91,6 +116,7 @@ final class MediaIntegrationTests: XCTestCase {
 
     func testSourceNoiseAnalysisOnSuppliedPhotoAndGoPro() async throws {
         for (path, kind) in [("test_media/photos/P8110319.JPG", MediaKind.photo),
+                             ("test_media/photos/P7310233.JPG", MediaKind.photo),
                              ("test_media/videos/GX011247.MP4", MediaKind.video)] {
             let url = fixtures.appendingPathComponent(path)
             var recipe = EditRecipe(sourcePath: url.path, kind: kind)
@@ -104,6 +130,7 @@ final class MediaIntegrationTests: XCTestCase {
             XCTAssertTrue(result.chromaSigma.isFinite && result.luminanceSigma.isFinite)
             XCTAssertTrue((0...1).contains(result.confidence))
             print("CP4_ANALYSIS \(path) chroma=\(result.chromaSigma) luma=\(result.luminanceSigma) confidence=\(result.confidence) tiles=\(result.validTiles) frames=\(result.frameCount)")
+            print("CP5_WATER \(path) rgb=\(String(describing: result.water.map { [$0.red, $0.green, $0.blue] })) confidence=\(result.water?.confidence ?? 0) samples=\(result.water?.samples ?? 0) frames=\(result.water?.frameCount ?? 0)")
         }
     }
 
@@ -116,14 +143,14 @@ final class MediaIntegrationTests: XCTestCase {
         let video = fixtures.appendingPathComponent("test_media/videos/GX011247.MP4")
         model.importURLs([photo, video])
         let photoRecipe = try XCTUnwrap(model.items.first { $0.current.sourcePath == photo.path }?.current)
-        XCTAssertEqual(photoRecipe.rendererVersion, 4)
+        XCTAssertEqual(photoRecipe.rendererVersion, 5)
         XCTAssertEqual(photoRecipe.sourceColor?.dynamicRange, .sdr)
         for _ in 0..<50 {
             if model.items.first(where: { $0.current.sourcePath == video.path })?.current.sourceColor != nil { break }
             try await Task.sleep(for: .milliseconds(100))
         }
         let videoRecipe = try XCTUnwrap(model.items.first { $0.current.sourcePath == video.path }?.current)
-        XCTAssertEqual(videoRecipe.rendererVersion, 4)
+        XCTAssertEqual(videoRecipe.rendererVersion, 5)
         XCTAssertEqual(videoRecipe.sourceColor?.sourceBitDepth, 10)
         XCTAssertEqual(videoRecipe.sourceColor?.dynamicRange, .sdr)
         XCTAssertEqual(try store.load(id: photoRecipe.id).current.sourceColor, photoRecipe.sourceColor)
@@ -174,16 +201,18 @@ final class MediaIntegrationTests: XCTestCase {
         XCTAssertLessThan(difference / (64 * 3), 0.001)
     }
 
-    func testPhotoGradeAndExportPreserveOriginal() throws {
+    func testPhotoGradeAndExportPreserveOriginal() async throws {
         let source = fixtures.appendingPathComponent("test_media/photos/P8110319.JPG")
         let before = try checksum(source)
         let output = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".jpg")
         defer { try? FileManager.default.removeItem(at: output) }
-        var color = ColorState()
-        color.setEasy { $0.waterColor = 50; $0.colorRecovery = 40; $0.light = 20 }
+        var color = ColorState(mappingVersion: 2)
+        color.setEasy { $0.waterColor = 50; $0.colorRecovery = 40; $0.light = 20; $0.visibility = 40 }
         color.setEffective(.aquaHue, to: 20)
         var recipe = EditRecipe(sourcePath: source.path, kind: .photo)
         recipe.color = color
+        let photoIdentity = try SourceNoiseAnalysis.identity(recipe: recipe, url: source)
+        recipe.noiseAnalysis = try await SourceNoiseAnalysis.analyze(url: source, recipe: recipe, identity: photoIdentity)
         recipe.geometry.aspect = .fourFive
         let preview = try MediaIO.photoPreview(url: source, recipe: recipe)
         XCTAssertEqual(Int(preview.size.width), 1350)
@@ -321,6 +350,8 @@ final class MediaIntegrationTests: XCTestCase {
         var recipe = EditRecipe(sourcePath: source.path, kind: .video)
         recipe.color.setEffective(.exposure, to: 0.25)
         recipe.color.setEffective(.saturation, to: 12)
+        recipe.color.setEffective(.clarity, to: 25)
+        recipe.color.setEffective(.dehaze, to: 20)
         recipe.detail.colorNoise = 60
         recipe.detail.luminanceNoise = 25
         recipe.videoTrim.startSeconds = 0.3
@@ -329,6 +360,8 @@ final class MediaIntegrationTests: XCTestCase {
         var gradient = EditMask(name: "Water", kind: .linear)
         gradient.adjustment[.exposure] = 0.3
         recipe.masks.append(gradient)
+        let videoIdentity = try SourceNoiseAnalysis.identity(recipe: recipe, url: source)
+        recipe.noiseAnalysis = try await SourceNoiseAnalysis.analyze(url: source, recipe: recipe, identity: videoIdentity)
         let item = try await MediaIO.videoItem(url: source, recipe: recipe)
         XCTAssertNotNil(item.videoComposition)
         print("GX011247 composition size: \(String(describing: item.videoComposition?.renderSize))")
