@@ -41,9 +41,14 @@ struct MaskInspector: View {
                 }
                 if let mask = model.selectedMask {
                     Divider().overlay(EditorTheme.divider)
-                    TextField("Mask name", text: Binding(get: { model.selectedMask?.name ?? "" }, set: { value in
-                        model.updateMask { $0.name = value }
-                    }))
+                    HStack {
+                        TextField("Mask name", text: Binding(get: { model.selectedMask?.name ?? "" }, set: { value in
+                            model.updateMask { $0.name = value }
+                        }))
+                        Button("Delete Mask", systemImage: "trash", role: .destructive) { model.deleteSelectedMask() }
+                            .labelStyle(.iconOnly).help("Delete selected mask; Undo restores it")
+                            .accessibilityLabel("Delete selected mask")
+                    }
                     Toggle("Invert selection", isOn: Binding(get: { model.selectedMask?.inverted ?? false }, set: { value in
                         model.updateMask { $0.inverted = value }
                     }))
@@ -55,7 +60,6 @@ struct MaskInspector: View {
                     if mask.kind == .brush || mask.kind == .subject { brushControls }
                     if mask.kind == .radial { radialControls }
                     if mask.kind == .linear { linearControls }
-                    Button("Delete Mask", role: .destructive) { model.deleteSelectedMask() }
                     Divider().overlay(EditorTheme.divider)
                     localHeader("Local Light", parameters: [.exposure, .contrast, .highlights, .shadows, .whites, .blacks])
                     ForEach([Parameter.exposure, .contrast, .highlights, .shadows, .whites, .blacks], id: \.self) { localSlider($0) }
@@ -104,14 +108,20 @@ struct MaskInspector: View {
             geometrySlider("Center Y", \.center.y)
             geometrySlider("Width", \.radiusX)
             geometrySlider("Height", \.radiusY)
-            Text("Rotation \(Int(model.selectedMask?.rotationDegrees ?? 0))°").font(.caption)
-            Slider(value: Binding(get: { model.selectedMask?.rotationDegrees ?? 0 }, set: { value in
+            Text("Rotation \(Int(radialRotationValue.rounded()))°").font(.caption)
+            Slider(value: Binding(get: { radialRotationValue }, set: { value in
                 model.updateMask { $0.rotationDegrees = value }
-            }), in: -180...180, onEditingChanged: { editing in editing ? model.beginGesture() : model.endGesture() })
-                .modifier(GoldSliderTrack(value: model.selectedMask?.rotationDegrees ?? 0, range: -180...180))
+            }), in: -90...90, onEditingChanged: { editing in editing ? model.beginGesture() : model.endGesture() })
+                .modifier(GoldSliderTrack(value: radialRotationValue, range: -90...90))
                 .accessibilityLabel("Radial rotation")
             geometrySlider("Feather", \.feather)
+            Text("Softens the mask edge.").font(EditorTheme.helper).foregroundStyle(EditorTheme.secondaryText)
         }
+    }
+
+    private var radialRotationValue: Double {
+        let angle = (model.selectedMask?.rotationDegrees ?? 0).truncatingRemainder(dividingBy: 180)
+        return angle > 90 ? angle - 180 : angle < -90 ? angle + 180 : angle
     }
 
     private var linearControls: some View {
@@ -143,7 +153,7 @@ struct MaskInspector: View {
                 model.updateMask { $0.adjustment[parameter] = value }
             }), range: parameter.limits, onEditingChanged: { editing in editing ? model.beginGesture() : model.endGesture() },
                            accessibilityLabel: "Local \(parameter.title)",
-                           hueGuideBand: mixer && parameter.rawValue.hasSuffix("Hue") ? selectedBand : nil)
+                           hueBand: mixer && parameter.rawValue.hasSuffix("Hue") ? selectedBand : nil)
     }
 
     private func localHeader(_ title: String, parameters: [Parameter]) -> some View {

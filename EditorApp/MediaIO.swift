@@ -104,9 +104,9 @@ enum MediaIO {
     private static func overlay(_ image: CIImage, recipe: EditRecipe, selectedMaskID: UUID?) -> CIImage {
         guard let selectedMaskID, let mask = recipe.masks.first(where: { $0.id == selectedMaskID }) else { return image }
         let alpha = MaskRenderer.alphaImage(for: mask, extent: image.extent)
-        let tint = CIImage(color: CIColor(red: 0.17, green: 0.5, blue: 0.9, alpha: 1)).cropped(to: image.extent)
+        let tint = CIImage(color: CIColor(red: 0.95, green: 0.22, blue: 0.36, alpha: 1)).cropped(to: image.extent)
         let tinted = tint.applyingFilter("CIBlendWithMask", parameters: [kCIInputBackgroundImageKey: image, "inputMaskImage": alpha])
-        return tinted.applyingFilter("CIDissolveTransition", parameters: [kCIInputTargetImageKey: image, kCIInputTimeKey: 0.65])
+        return tinted.applyingFilter("CIDissolveTransition", parameters: [kCIInputTargetImageKey: image, kCIInputTimeKey: 0.4])
     }
 
     static func videoComposition(asset: AVURLAsset, recipe: EditRecipe, selectedMaskID: UUID? = nil) async throws -> AVVideoComposition {

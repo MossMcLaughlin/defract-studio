@@ -76,9 +76,10 @@ struct EditorView: View {
             if model.busy { ProgressView().controlSize(.small) }
             Button { model.exportSheetRequested = true } label: {
                 Label("Export…", systemImage: "square.and.arrow.up")
-                    .foregroundStyle(EditorTheme.canvas)
+                    .foregroundStyle(EditorTheme.primaryText)
                     .padding(.horizontal, 13).padding(.vertical, 8)
-                    .background(EditorTheme.gold, in: RoundedRectangle(cornerRadius: 7))
+                    .background(EditorTheme.raised, in: RoundedRectangle(cornerRadius: 7))
+                    .overlay(RoundedRectangle(cornerRadius: 7).stroke(EditorTheme.divider))
             }
                 .disabled(model.draft == nil || model.busy || model.sourceSize == .zero)
                 .keyboardShortcut("e", modifiers: .command)
@@ -344,20 +345,20 @@ struct EditorView: View {
                 Text("Underwater Easy").font(EditorTheme.heading)
                 Spacer()
                 Image(systemName: "info.circle").foregroundStyle(EditorTheme.secondaryText)
-                    .help("Guided color controls. Manual Advanced refinements are preserved.")
+                    .help("Easy makes quick underwater adjustments. Advanced offers precise controls, and your manual refinements stay in place when Easy changes.")
                     .accessibilityLabel("Underwater Easy information")
             }
-            Text("Quick adjustments for underwater photos. Balance color, light, and visibility in a few steps.")
+            Text("Quick, natural adjustments for underwater photos. Restore color, balance light, and improve clarity in a few steps.")
                 .font(EditorTheme.helper).foregroundStyle(EditorTheme.secondaryText)
                 .fixedSize(horizontal: false, vertical: true)
             easySlider("Water Color", \.waterColor, range: -100...100,
-                       description: "Balance blue and green casts.", endpoints: ("Deepen Blue", "Remove Green"))
+                       description: "Adjust the blue/green cast in the water.", endpoints: ("Deepen Blue", "Remove Green"))
             easySlider("Color Recovery", \.colorRecovery, range: 0...100,
-                       description: "Restore natural warmth and color in subjects and reefs.")
+                       description: "Restore natural colors in the subject and reef.")
             easySlider("Light", \.light, range: -100...100,
-                       description: "Adjust exposure while keeping highlights and shadows balanced.")
+                       description: "Brighten and balance the overall exposure.")
             easySlider("Visibility", \.visibility, range: 0...100,
-                       description: "Improve contrast and clarity in hazy water.")
+                       description: "Improve clarity and distance by reducing haze.")
             if model.draft?.color.manualDelta.isNeutral == false {
                 Text(shownManualHelp ? "Customized in Advanced" : "Manual refinements are preserved when you change Easy controls. Start with Easy and finish with Advanced.")
                     .font(EditorTheme.helper).foregroundStyle(EditorTheme.secondaryText)
@@ -441,8 +442,6 @@ struct EditorView: View {
             Divider().overlay(EditorTheme.divider)
             sectionHeader("Color Mixer", help: "Reset all manual Color Mixer adjustments") { model.change { $0.color.resetManual(Array(Parameter.allCases.dropFirst(10))) } }
             MixerBandPicker(selection: $selectedBand)
-            Text("Positive Green Hue moves toward Aqua; positive Aqua Hue moves toward Blue.")
-                .font(EditorTheme.helper).foregroundStyle(EditorTheme.secondaryText)
             let parameters = Array(Parameter.allCases.dropFirst(10))
             ForEach(parameters[(selectedBand * 3)..<(selectedBand * 3 + 3)], id: \.self) { parameter in advancedSlider(parameter, mixer: true) }
         }
@@ -456,7 +455,7 @@ struct EditorView: View {
             }), range: parameter.limits, onEditingChanged: { editing in editing ? model.beginGesture() : model.endGesture() },
                            accessibilityLabel: parameter.title,
                            onLabelDoubleClick: { model.change { $0.color.setEffective(parameter, to: $0.color.base[parameter]) } },
-                           hueGuideBand: mixer && parameter.rawValue.hasSuffix("Hue") ? selectedBand : nil)
+                           hueBand: mixer && parameter.rawValue.hasSuffix("Hue") ? selectedBand : nil)
     }
 
     private func sectionHeader(_ title: String, help: String, action: @escaping () -> Void) -> some View {
@@ -500,12 +499,12 @@ struct MixerBandPicker: View {
 
 enum EditorTheme {
     static let canvas = Color(red: 11 / 255, green: 11 / 255, blue: 10 / 255)
-    static let toolbar = Color(red: 0.09, green: 0.10, blue: 0.10)
-    static let panel = Color(red: 0.13, green: 0.14, blue: 0.14)
+    static let toolbar = Color(red: 0.055, green: 0.055, blue: 0.055)
+    static let panel = Color(red: 0.075, green: 0.075, blue: 0.075)
     static let raised = Color(red: 0.18, green: 0.19, blue: 0.19)
     static let primaryText = Color(red: 246 / 255, green: 242 / 255, blue: 233 / 255)
     static let secondaryText = Color(red: 174 / 255, green: 179 / 255, blue: 174 / 255)
-    static let gold = Color(red: 208 / 255, green: 160 / 255, blue: 55 / 255)
+    static let gold = Color(red: 199 / 255, green: 166 / 255, blue: 106 / 255)
     static let pacific = Color(red: 45 / 255, green: 112 / 255, blue: 143 / 255)
     static let divider = Color.white.opacity(0.12)
     static let heading = Font.system(size: 17, weight: .semibold)
@@ -559,7 +558,7 @@ struct InspectorSliderRow: View {
     var description: String? = nil
     var endpoints: (String, String)? = nil
     var onLabelDoubleClick: (() -> Void)? = nil
-    var hueGuideBand: Int? = nil
+    var hueBand: Int? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -571,13 +570,12 @@ struct InspectorSliderRow: View {
             }
             .foregroundStyle(EditorTheme.primaryText)
             Slider(value: selection, in: range, onEditingChanged: onEditingChanged)
-                .modifier(GoldSliderTrack(value: selection.wrappedValue, range: range))
+                .modifier(GoldSliderTrack(value: selection.wrappedValue, range: range, hueBand: hueBand))
                 .accessibilityLabel(accessibilityLabel ?? title)
             if let endpoints {
                 HStack { Text(endpoints.0); Spacer(); Text(endpoints.1) }
                     .font(EditorTheme.helper).foregroundStyle(EditorTheme.secondaryText)
             }
-            if let hueGuideBand { MixerHueGuide(band: hueGuideBand) }
             if let description {
                 Text(description).font(EditorTheme.helper).foregroundStyle(EditorTheme.secondaryText)
                     .fixedSize(horizontal: false, vertical: true)
@@ -589,16 +587,27 @@ struct InspectorSliderRow: View {
 struct GoldSliderTrack: ViewModifier {
     let value: Double
     let range: ClosedRange<Double>
+    var hueBand: Int? = nil
 
     func body(content: Content) -> some View {
-        content.tint(EditorTheme.gold)
+        content.tint(EditorTheme.raised)
             .overlay {
                 GeometryReader { geometry in
                     let fraction = CGFloat(min(1, max(0, (value - range.lowerBound) / (range.upperBound - range.lowerBound))))
-                    let width = max(0, (geometry.size.width - 20) * fraction - 10)
+                    let trackWidth = max(0, geometry.size.width - 20)
+                    let center = range.lowerBound < 0 && range.upperBound > 0
+                        ? CGFloat(-range.lowerBound / (range.upperBound - range.lowerBound)) : 0
+                    let start = hueBand == nil ? min(center, fraction) : 0
+                    let end = hueBand == nil ? max(center, fraction) : 1
                     Capsule().fill(EditorTheme.gold)
-                        .frame(width: width, height: 4)
-                        .position(x: 10 + width / 2, y: geometry.size.height / 2)
+                        .frame(width: trackWidth * (end - start), height: 4)
+                        .position(x: 10 + trackWidth * (start + end) / 2, y: geometry.size.height / 2)
+                        .opacity(hueBand == nil ? 1 : 0)
+                    if let hueBand {
+                        MixerHueGuide(band: hueBand)
+                            .frame(width: trackWidth, height: 4)
+                            .position(x: geometry.size.width / 2, y: geometry.size.height / 2)
+                    }
                 }
                 .allowsHitTesting(false)
                 .accessibilityHidden(true)
@@ -611,7 +620,7 @@ struct MixerHueGuide: View {
     private let colors: [Color] = [.red, .orange, .yellow, .green, .cyan, .blue, .purple, .pink]
     var body: some View {
         LinearGradient(colors: [colors[(band + 7) % 8], colors[band], colors[(band + 1) % 8]], startPoint: .leading, endPoint: .trailing)
-            .frame(height: 4).clipShape(Capsule()).padding(.horizontal, 8)
+            .clipShape(Capsule())
             .accessibilityHidden(true)
     }
 }
