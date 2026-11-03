@@ -29,6 +29,7 @@ struct EditorView: View {
     @State private var confirmReset = false
     @State private var painting = false
     @State private var hoverLocation: CGPoint?
+    @State private var showingEasyHelp = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -56,22 +57,22 @@ struct EditorView: View {
     private var toolbar: some View {
         HStack(spacing: 8) {
             if !sidebarVisible {
-                Button { sidebarVisible = true } label: { Label("Show Files", systemImage: "sidebar.left") }
+                Button { sidebarVisible = true } label: {
+                    Label("Show Files", systemImage: "sidebar.left")
+                        .labelStyle(.iconOnly).modifier(ToolbarButtonSurface())
+                }
                     .help("Show Files").accessibilityLabel("Show Files")
             }
-            Button(action: model.undo) { Label("Undo", systemImage: "arrow.uturn.backward") }
+            Button(action: model.undo) { Label("Undo", systemImage: "arrow.uturn.backward").modifier(ToolbarButtonSurface()) }
                 .disabled(!model.canUndo).keyboardShortcut("z", modifiers: .command).help("Undo")
-            Button(action: model.redo) { Label("Redo", systemImage: "arrow.uturn.forward") }
+            Button(action: model.redo) { Label("Redo", systemImage: "arrow.uturn.forward").modifier(ToolbarButtonSurface()) }
                 .disabled(!model.canRedo).keyboardShortcut("z", modifiers: [.command, .shift]).help("Redo")
             Rectangle().fill(EditorTheme.divider).frame(width: 1, height: 20).padding(.horizontal, 5)
             Button { model.showingOriginal.toggle(); model.refresh() } label: {
                 Label(model.showingOriginal ? "Show Edited" : "Before/After", systemImage: "rectangle.split.2x1")
+                    .modifier(ToolbarButtonSurface())
             }
                 .disabled(model.draft == nil).help("Toggle original and edited preview")
-            Button { resetZoom(); model.toggleCropEditing() } label: {
-                Label(model.cropEditing ? "Done Cropping" : "Crop & Rotate", systemImage: "crop.rotate")
-            }
-                .disabled(model.draft == nil).help("Crop and rotate")
             Spacer()
             if model.busy { ProgressView().controlSize(.small) }
             Button { model.exportSheetRequested = true } label: {
@@ -91,6 +92,20 @@ struct EditorView: View {
         .padding(.horizontal, 12)
         .frame(height: 50)
         .background(EditorTheme.toolbar)
+        .overlay {
+            if let recipe = model.draft {
+                GeometryReader { geometry in
+                    Text(URL(fileURLWithPath: recipe.sourcePath).lastPathComponent)
+                        .font(EditorTheme.control)
+                        .foregroundStyle(EditorTheme.secondaryText)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .frame(width: max(0, min(240, geometry.size.width - 2 * (sidebarVisible ? 325 : 390))))
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .allowsHitTesting(false)
+                }
+            }
+        }
     }
 
     private var sidebar: some View {
@@ -128,11 +143,7 @@ struct EditorView: View {
     }
 
     private var preview: some View {
-        VStack(spacing: 8) {
-            if let recipe = model.draft {
-                Text(URL(fileURLWithPath: recipe.sourcePath).lastPathComponent)
-                    .font(.caption).foregroundStyle(.secondary).lineLimit(1)
-            }
+        VStack(spacing: 4) {
             Spacer(minLength: 0)
             if let player = model.player {
                 PlayerView(player: player).frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -202,10 +213,11 @@ struct EditorView: View {
             Spacer(minLength: 0)
             if model.kind == .video {
                 videoControls
-                HStack { Spacer(); mediaDimensions }
+                HStack { cropButton; Spacer(); mediaDimensions }
             }
             else if model.kind == .photo {
                 HStack {
+                    cropButton
                     Button("Fit") { resetZoom() }
                     Slider(value: $zoom, in: 1...4).frame(width: 120)
                     Text(zoom == 1 ? "Fit" : String(format: "%.1f× Fit", zoom))
@@ -214,8 +226,22 @@ struct EditorView: View {
                 }.font(EditorTheme.control).tint(EditorTheme.gold)
             }
         }
-        .padding(12)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
         .background(EditorTheme.canvas)
+    }
+
+    private var cropButton: some View {
+        Button { resetZoom(); model.toggleCropEditing() } label: {
+            Image(systemName: "crop.rotate")
+                .frame(width: 28, height: 26)
+                .foregroundStyle(model.cropEditing ? EditorTheme.primaryText : EditorTheme.secondaryText)
+                .background(model.cropEditing ? EditorTheme.pacific : EditorTheme.raised, in: RoundedRectangle(cornerRadius: 6))
+        }
+        .buttonStyle(.plain)
+        .disabled(model.draft == nil)
+        .help("Crop & Rotate")
+        .accessibilityLabel("Crop & Rotate")
     }
 
     private var mediaDimensions: some View {
@@ -342,17 +368,24 @@ struct EditorView: View {
         VStack(alignment: .leading, spacing: 18) {
             HStack(spacing: 8) {
                 Image(systemName: "water.waves").foregroundStyle(EditorTheme.pacific)
-                Text("Underwater Easy").font(EditorTheme.heading)
+                Text("Underwater Easy").font(.system(size: 20, weight: .semibold))
                 Spacer()
-                Image(systemName: "info.circle").foregroundStyle(EditorTheme.secondaryText)
-                    .help("Easy makes quick underwater adjustments. Advanced offers precise controls, and your manual refinements stay in place when Easy changes.")
+                Button { showingEasyHelp.toggle() } label: {
+                    Image(systemName: "info.circle").foregroundStyle(EditorTheme.secondaryText)
+                }
+                    .buttonStyle(.plain)
+                    .help("Easy gives you quick underwater corrections using a few sliders, while Advanced shows the precise color controls behind the result. You can fine-tune in Advanced, and those refinements remain when you return to Easy.")
                     .accessibilityLabel("Underwater Easy information")
+                    .popover(isPresented: $showingEasyHelp) {
+                        Text("Easy gives you quick underwater corrections using a few sliders, while Advanced shows the precise color controls behind the result. You can fine-tune in Advanced, and those refinements remain when you return to Easy.")
+                            .font(EditorTheme.helper).padding(14).frame(width: 290)
+                    }
             }
             Text("Quick, natural adjustments for underwater photos. Restore color, balance light, and improve clarity in a few steps.")
                 .font(EditorTheme.helper).foregroundStyle(EditorTheme.secondaryText)
                 .fixedSize(horizontal: false, vertical: true)
             easySlider("Water Color", \.waterColor, range: -100...100,
-                       description: "Adjust the blue/green cast in the water.", endpoints: ("Deepen Blue", "Remove Green"))
+                       description: "Adjust the blue/green cast in the water.")
             easySlider("Color Recovery", \.colorRecovery, range: 0...100,
                        description: "Restore natural colors in the subject and reef.")
             easySlider("Light", \.light, range: -100...100,
@@ -499,8 +532,8 @@ struct MixerBandPicker: View {
 
 enum EditorTheme {
     static let canvas = Color(red: 11 / 255, green: 11 / 255, blue: 10 / 255)
-    static let toolbar = Color(red: 0.055, green: 0.055, blue: 0.055)
-    static let panel = Color(red: 0.075, green: 0.075, blue: 0.075)
+    static let toolbar = Color(red: 0.106, green: 0.11, blue: 0.11)
+    static let panel = Color(red: 0.063, green: 0.067, blue: 0.067)
     static let raised = Color(red: 0.18, green: 0.19, blue: 0.19)
     static let primaryText = Color(red: 246 / 255, green: 242 / 255, blue: 233 / 255)
     static let secondaryText = Color(red: 174 / 255, green: 179 / 255, blue: 174 / 255)
@@ -511,6 +544,13 @@ enum EditorTheme {
     static let control = Font.system(size: 13, weight: .medium)
     static let value = Font.system(size: 13, weight: .medium).monospacedDigit()
     static let helper = Font.system(size: 11, weight: .regular)
+}
+
+private struct ToolbarButtonSurface: ViewModifier {
+    func body(content: Content) -> some View {
+        content.padding(.horizontal, 8).padding(.vertical, 6)
+            .background(EditorTheme.raised.opacity(0.6), in: RoundedRectangle(cornerRadius: 6))
+    }
 }
 
 struct EditorTabs: View {
