@@ -192,8 +192,8 @@ public struct EditRecipe: Codable, Equatable, Sendable {
     public init(sourcePath: String, kind: MediaKind) {
         self.sourcePath = sourcePath
         self.kind = kind
-        self.schemaVersion = 2
-        self.rendererVersion = 2
+        self.schemaVersion = 3
+        self.rendererVersion = 3
     }
 
     public var hasUnexportedEdits: Bool {

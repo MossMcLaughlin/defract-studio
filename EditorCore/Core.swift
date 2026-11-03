@@ -25,10 +25,8 @@ public struct RenderPlan: Sendable {
     }
 
     public func grade(_ source: CIImage) -> CIImage {
-        if version == 1 { return CoreRenderer.render(source, color: color, masks: masks) }
-        // V2's input and source-protection stages are neutral at this checkpoint.
-        // Its creative stage keeps v1 math until the next color-math checkpoint.
-        return CoreRenderer.render(source, color: color, masks: masks)
+        if version <= 2 { return CoreRenderer.render(source, color: color, masks: masks) }
+        return CoreRenderer.renderV3(source, color: color, masks: masks)
     }
 
     public func applyGeometry(_ image: CIImage) -> CIImage {

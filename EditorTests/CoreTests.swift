@@ -4,10 +4,192 @@ import AppKit
 import EditorCore
 
 final class CoreTests: XCTestCase {
+    private func v3Pixel(_ rgb: (Float, Float, Float), adjustments: [(Parameter, Double)], alpha: Float = 1) throws -> [Float] {
+        let space = CGColorSpace(name: CGColorSpace.extendedLinearSRGB)!
+        let sourceValues: [Float] = [rgb.0 * alpha, rgb.1 * alpha, rgb.2 * alpha, alpha]
+        let data = sourceValues.withUnsafeBytes { Data($0) }
+        let source = CIImage(bitmapData: data, bytesPerRow: 16, size: CGSize(width: 1, height: 1),
+                             format: .RGBAf, colorSpace: space)
+        var recipe = EditRecipe(sourcePath: "/tmp/swatch.png", kind: .photo)
+        for (parameter, value) in adjustments { recipe.color.setEffective(parameter, to: value) }
+        let result = RenderPlan(recipe: recipe).grade(source)
+        let context = CIContext(options: [.workingColorSpace: space, .workingFormat: CIFormat.RGBAh])
+        var pixels = [Float](repeating: 0, count: 4)
+        pixels.withUnsafeMutableBytes { bytes in
+            context.render(result, toBitmap: bytes.baseAddress!, rowBytes: 16,
+                           bounds: CGRect(x: 0, y: 0, width: 1, height: 1), format: .RGBAf, colorSpace: space)
+        }
+        return pixels
+    }
+
+    func testV3ExposureWhiteBalanceAndNeutral() throws {
+        let neutral = try v3Pixel((0.1, 0.2, 0.3), adjustments: [])
+        XCTAssertEqual(neutral[0], 0.1, accuracy: 0.001)
+        XCTAssertEqual(neutral[1], 0.2, accuracy: 0.001)
+        XCTAssertEqual(neutral[2], 0.3, accuracy: 0.001)
+        let doubled = try v3Pixel((0.1, 0.2, 0.3), adjustments: [(.exposure, 1)])
+        for channel in 0..<3 { XCTAssertEqual(doubled[channel], neutral[channel] * 2, accuracy: 0.005) }
+        let warm = try v3Pixel((0.2, 0.2, 0.2), adjustments: [(.temperature, 50)])
+        XCTAssertGreaterThan(warm[0], warm[2])
+        let magenta = try v3Pixel((0.2, 0.2, 0.2), adjustments: [(.tint, 50)])
+        XCTAssertGreaterThan((magenta[0] + magenta[2]) / 2, magenta[1])
+    }
+
+    func testV3ToneProjectionAndFiniteExtendedValues() throws {
+        var vector = AdjustmentVector()
+        vector[.contrast] = -100
+        vector[.shadows] = 100
+        vector[.highlights] = -100
+        vector[.blacks] = 100
+        vector[.whites] = -100
+        let samples = ToneCurveV3.samples(for: vector)
+        XCTAssertEqual(samples.count, 4096)
+        let minimumStep = Float(0.05 * 24 / 4095)
+        for index in 1..<samples.count {
+            XCTAssertTrue(samples[index].isFinite)
+            XCTAssertGreaterThanOrEqual(samples[index] - samples[index - 1], minimumStep - 0.00001)
+        }
+        let extended = try v3Pixel((-0.2, 0.5, 1.4), adjustments: [(.contrast, 50), (.saturation, 50)])
+        XCTAssertTrue(extended.allSatisfy(\.isFinite))
+        XCTAssertTrue(extended.prefix(3).allSatisfy { (0...1).contains($0) })
+    }
+
+    func testV3ToneRenderingIsOrderedAndDirectional() throws {
+        let settings: [(Parameter, Double)] = [(.contrast, -100), (.shadows, 100),
+                                               (.highlights, -100), (.blacks, 100), (.whites, -100)]
+        let grays: [Float] = [0.001, 0.003, 0.01, 0.03, 0.08, 0.18, 0.4, 0.7, 0.95]
+        let output = try grays.map { try v3Pixel(($0, $0, $0), adjustments: settings)[0] }
+        for index in 1..<output.count { XCTAssertGreaterThan(output[index], output[index - 1]) }
+        let shadow = try v3Pixel((0.03, 0.03, 0.03), adjustments: [(.shadows, 50)])
+        XCTAssertGreaterThan(shadow[0], 0.03)
+        let highlight = try v3Pixel((0.7, 0.7, 0.7), adjustments: [(.highlights, -50)])
+        XCTAssertLessThan(highlight[0], 0.7)
+        let pivot = try v3Pixel((0.18, 0.18, 0.18), adjustments: [(.contrast, 70)])
+        XCTAssertEqual(pivot[0], 0.18, accuracy: 0.002)
+        let neutralBright = try v3Pixel((0.9, 0.9, 0.9), adjustments: [])
+        let tinyExposure = try v3Pixel((0.9, 0.9, 0.9), adjustments: [(.exposure, 0.0001)])
+        XCTAssertLessThan(abs(tinyExposure[0] - neutralBright[0]), 0.001)
+    }
+
+    func testV3MixerHueDirectionsGraysAndAlpha() throws {
+        let green = try v3Pixel((0.02, 0.45, 0.08), adjustments: [])
+        let shiftedGreen = try v3Pixel((0.02, 0.45, 0.08), adjustments: [(.greenHue, 80)])
+        XCTAssertGreaterThan(shiftedGreen[2], green[2])
+        let aqua = try v3Pixel((0.02, 0.35, 0.48), adjustments: [])
+        let shiftedAqua = try v3Pixel((0.02, 0.35, 0.48), adjustments: [(.aquaHue, 80)])
+        XCTAssertGreaterThan(shiftedAqua[2] - shiftedAqua[1], aqua[2] - aqua[1])
+        let gray = try v3Pixel((0.3, 0.3, 0.3), adjustments: [(.redHue, 100), (.greenHue, 100)])
+        XCTAssertEqual(gray[0], gray[1], accuracy: 0.002)
+        XCTAssertEqual(gray[1], gray[2], accuracy: 0.002)
+        let desaturated = try v3Pixel((0.02, 0.45, 0.08), adjustments: [(.saturation, -100)])
+        XCTAssertEqual(desaturated[0], desaturated[1], accuracy: 0.002)
+        XCTAssertEqual(desaturated[1], desaturated[2], accuracy: 0.002)
+        let redLeft = try v3Pixel((0.5, 0.01, 0.02), adjustments: [(.redHue, 70)])
+        let redRight = try v3Pixel((0.5, 0.02, 0.01), adjustments: [(.redHue, 70)])
+        for channel in 0..<3 { XCTAssertLessThan(abs(redLeft[channel] - redRight[channel]), 0.06) }
+        let transparent = try v3Pixel((0.2, 0.3, 0.4), adjustments: [(.vibrance, 100)], alpha: 0)
+        XCTAssertTrue(transparent.allSatisfy(\.isFinite))
+        XCTAssertEqual(transparent[3], 0, accuracy: 0.0001)
+        let translucent = try v3Pixel((0.2, 0.3, 0.4), adjustments: [(.blueHue, 50)], alpha: 0.25)
+        XCTAssertTrue(translucent.allSatisfy(\.isFinite))
+        XCTAssertEqual(translucent[3], 0.25, accuracy: 0.001)
+    }
+
+    func testV3AllEightMixerBandsRespond() throws {
+        let swatches: [((Float, Float, Float), Parameter, Parameter, Parameter)] = [
+            ((0.5, 0.02, 0.02), .redHue, .redSaturation, .redLuminance),
+            ((0.5, 0.2, 0.01), .orangeHue, .orangeSaturation, .orangeLuminance),
+            ((0.5, 0.5, 0.01), .yellowHue, .yellowSaturation, .yellowLuminance),
+            ((0.02, 0.5, 0.02), .greenHue, .greenSaturation, .greenLuminance),
+            ((0.02, 0.4, 0.5), .aquaHue, .aquaSaturation, .aquaLuminance),
+            ((0.01, 0.05, 0.5), .blueHue, .blueSaturation, .blueLuminance),
+            ((0.2, 0.01, 0.5), .purpleHue, .purpleSaturation, .purpleLuminance),
+            ((0.5, 0.01, 0.2), .magentaHue, .magentaSaturation, .magentaLuminance)
+        ]
+        for (swatch, hue, saturation, luminance) in swatches {
+            let before = try v3Pixel(swatch, adjustments: [])
+            for (parameter, value) in [(hue, 50.0), (saturation, -50.0), (luminance, 50.0)] {
+                let after = try v3Pixel(swatch, adjustments: [(parameter, value)])
+                let change = zip(before.prefix(3), after.prefix(3)).reduce(0 as Float) { $0 + abs($1.0 - $1.1) }
+                XCTAssertGreaterThan(change, 0.003, "\(parameter) produced no visible change")
+            }
+        }
+    }
+
+    func testV3SaturationAndVibranceScaleChroma() throws {
+        let source: (Float, Float, Float) = (0.24, 0.27, 0.3)
+        let neutral = try v3Pixel(source, adjustments: [])
+        let saturated = try v3Pixel(source, adjustments: [(.saturation, 60)])
+        let vivid = try v3Pixel(source, adjustments: [(.vibrance, 60)])
+        let muted = try v3Pixel(source, adjustments: [(.vibrance, -60)])
+        func spread(_ pixel: [Float]) -> Float { pixel[2] - pixel[0] }
+        XCTAssertGreaterThan(spread(saturated), spread(neutral))
+        XCTAssertGreaterThan(spread(vivid), spread(neutral))
+        XCTAssertLessThan(spread(muted), spread(neutral))
+    }
+
+    func testV3MaskedGradeKeepsGlobalAdjustment() {
+        let space = CGColorSpace(name: CGColorSpace.extendedLinearSRGB)!
+        let context = CIContext(options: [.workingColorSpace: space, .workingFormat: CIFormat.RGBAh])
+        let source = CIImage(color: CIColor(red: 0.2, green: 0.3, blue: 0.4))
+            .cropped(to: CGRect(x: 0, y: 0, width: 16, height: 16))
+        var recipe = EditRecipe(sourcePath: "/tmp/masked.png", kind: .photo)
+        recipe.color.setEffective(.exposure, to: 0.4)
+        let global = RenderPlan(recipe: recipe).grade(source)
+        var mask = EditMask(name: "Center", kind: .radial)
+        mask.adjustment[.exposure] = 0.5
+        recipe.masks = [mask]
+        let combined = RenderPlan(recipe: recipe).grade(source)
+        func pixel(_ image: CIImage, x: Int, y: Int) -> Float {
+            var values = [Float](repeating: 0, count: 4)
+            values.withUnsafeMutableBytes { bytes in
+                context.render(image, toBitmap: bytes.baseAddress!, rowBytes: 16,
+                               bounds: CGRect(x: x, y: y, width: 1, height: 1), format: .RGBAf, colorSpace: space)
+            }
+            return values[0]
+        }
+        XCTAssertGreaterThan(pixel(combined, x: 8, y: 8), pixel(global, x: 8, y: 8))
+        XCTAssertEqual(pixel(combined, x: 0, y: 0), pixel(global, x: 0, y: 0), accuracy: 0.002)
+        XCTAssertGreaterThan(pixel(global, x: 0, y: 0), pixel(source, x: 0, y: 0))
+    }
+
+    func testSavedRendererColorReferences() throws {
+        let contextV1 = CIContext(options: [.workingColorSpace: CGColorSpace(name: CGColorSpace.sRGB)!])
+        let contextV2 = CIContext(options: [.workingColorSpace: CGColorSpace(name: CGColorSpace.extendedLinearSRGB)!, .workingFormat: CIFormat.RGBAh])
+        var recipe = EditRecipe(sourcePath: "/tmp/color-reference.jpg", kind: .photo)
+        recipe.color.setEffective(.exposure, to: 0.5)
+        recipe.color.setEffective(.temperature, to: 18)
+        recipe.color.setEffective(.contrast, to: 24)
+        recipe.color.setEffective(.greenHue, to: 42)
+        recipe.color.setEffective(.aquaSaturation, to: 35)
+        let colors: [(CGFloat, CGFloat, CGFloat)] = [(0.18, 0.18, 0.18), (0.06, 0.42, 0.11), (0.04, 0.35, 0.48)]
+        let expected: [Int: [[UInt8]]] = [
+            1: [[57, 60, 64, 255], [16, 157, 74, 255], [2, 149, 237, 255]],
+            2: [[49, 49, 51, 255], [3, 120, 54, 255], [1, 98, 143, 255]]
+        ]
+        for version in [1, 2] {
+            recipe.schemaVersion = version
+            recipe.rendererVersion = version == 1 ? nil : version
+            let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: folder) }
+            let store = ProjectStore(directory: folder)
+            try store.save(EditHistory(recipe))
+            let reopened = try store.load(id: recipe.id).current
+            let context = version == 1 ? contextV1 : contextV2
+            for (index, (red, green, blue)) in colors.enumerated() {
+                let source = CIImage(color: CIColor(red: red, green: green, blue: blue)).cropped(to: CGRect(x: 0, y: 0, width: 1, height: 1))
+                let rendered = RenderPlan(recipe: reopened).grade(source)
+                let image = try XCTUnwrap(context.createCGImage(rendered, from: rendered.extent, format: .RGBA8, colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!))
+                let bytes = Array(try XCTUnwrap(image.dataProvider?.data) as Data)
+                XCTAssertEqual(Array(bytes.prefix(4)), try XCTUnwrap(expected[version]?[index]),
+                               "Saved renderer v\(version) color changed")
+            }
+        }
+    }
     func testRendererVersionDefaultsAndLegacyDecode() throws {
         let current = EditRecipe(sourcePath: "/tmp/source.jpg", kind: .photo)
-        XCTAssertEqual(current.schemaVersion, 2)
-        XCTAssertEqual(current.rendererVersion, 2)
+        XCTAssertEqual(current.schemaVersion, 3)
+        XCTAssertEqual(current.rendererVersion, 3)
         XCTAssertEqual(current.color.underwaterMappingVersion, 1)
         var object = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(current)) as? [String: Any])
         object.removeValue(forKey: "rendererVersion")
@@ -38,7 +220,10 @@ final class CoreTests: XCTestCase {
     func testV2NeutralPlanAndSourceColorAcrossUndoAndStorage() throws {
         let source = CIImage(color: CIColor(red: 0.2, green: 0.4, blue: 0.8))
             .cropped(to: CGRect(x: 0, y: 0, width: 2, height: 2))
-        var history = EditHistory(EditRecipe(sourcePath: "/tmp/source.jpg", kind: .photo))
+        var transitional = EditRecipe(sourcePath: "/tmp/source.jpg", kind: .photo)
+        transitional.schemaVersion = 2
+        transitional.rendererVersion = 2
+        var history = EditHistory(transitional)
         XCTAssertTrue(RenderPlan(recipe: history.current).grade(source) === source)
         history.apply { $0.color.setEffective(.exposure, to: 0.5) }
         let descriptor = SourceColorDescriptor(sourceBitDepth: 10, primaries: "ITU_R_709_2", transfer: "ITU_R_709_2",

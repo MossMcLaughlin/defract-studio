@@ -4,7 +4,7 @@ A local, native macOS editor for photos and single video clips. Edits are saved 
 
 ## Build and run
 
-Requires an Apple Silicon Mac with macOS 15 or later and Xcode with the macOS SDK. Open `EditorApp.xcodeproj`, select the **EditorApp** scheme and **My Mac**, then Run. `EditorApp/App.swift` is the app entry point. No external packages, account, network service, or paid developer team is needed for local Debug builds.
+Requires an Apple Silicon Mac with macOS 15 or later, Xcode with the macOS SDK, and Xcode's Metal Toolchain component. Open `EditorApp.xcodeproj`, select the **EditorApp** scheme and **My Mac**, then Run. `EditorApp/App.swift` is the app entry point. No external packages, account, network service, or paid developer team is needed for local Debug builds.
 
 For a command-line build and automated tests:
 

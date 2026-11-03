@@ -17,7 +17,7 @@ enum MediaIO {
     }
 
     private static func validateInterpretation(_ recipe: EditRecipe) throws {
-        guard (recipe.rendererVersion ?? 1) == 2 else { return }
+        guard (recipe.rendererVersion ?? 1) >= 2 else { return }
         if recipe.sourceColor?.dynamicRange == .hlg || recipe.sourceColor?.dynamicRange == .pq {
             throw NSError(domain: "Editor", code: 15, userInfo: [NSLocalizedDescriptionKey:
                 "HDR color conversion is not yet verified for this editor. The source was not graded or exported."])

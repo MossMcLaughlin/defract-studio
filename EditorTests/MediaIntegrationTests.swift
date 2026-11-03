@@ -55,14 +55,14 @@ final class MediaIntegrationTests: XCTestCase {
         let video = fixtures.appendingPathComponent("test_media/videos/GX011247.MP4")
         model.importURLs([photo, video])
         let photoRecipe = try XCTUnwrap(model.items.first { $0.current.sourcePath == photo.path }?.current)
-        XCTAssertEqual(photoRecipe.rendererVersion, 2)
+        XCTAssertEqual(photoRecipe.rendererVersion, 3)
         XCTAssertEqual(photoRecipe.sourceColor?.dynamicRange, .sdr)
         for _ in 0..<50 {
             if model.items.first(where: { $0.current.sourcePath == video.path })?.current.sourceColor != nil { break }
             try await Task.sleep(for: .milliseconds(100))
         }
         let videoRecipe = try XCTUnwrap(model.items.first { $0.current.sourcePath == video.path }?.current)
-        XCTAssertEqual(videoRecipe.rendererVersion, 2)
+        XCTAssertEqual(videoRecipe.rendererVersion, 3)
         XCTAssertEqual(videoRecipe.sourceColor?.sourceBitDepth, 10)
         XCTAssertEqual(videoRecipe.sourceColor?.dynamicRange, .sdr)
         XCTAssertEqual(try store.load(id: photoRecipe.id).current.sourceColor, photoRecipe.sourceColor)
@@ -71,7 +71,9 @@ final class MediaIntegrationTests: XCTestCase {
 
     func testNeutralV2PhotoMatchesLegacySDRBaseline() throws {
         let source = fixtures.appendingPathComponent("test_media/photos/P8110319.JPG")
-        let current = EditRecipe(sourcePath: source.path, kind: .photo)
+        var current = EditRecipe(sourcePath: source.path, kind: .photo)
+        current.schemaVersion = 2
+        current.rendererVersion = 2
         var legacy = current
         legacy.schemaVersion = 1
         legacy.rendererVersion = nil
