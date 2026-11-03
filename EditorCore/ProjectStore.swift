@@ -26,7 +26,9 @@ public struct ProjectStore {
             decoder.dateDecodingStrategy = .iso8601
             history = try decoder.decode(EditHistory.self, from: data)
         }
-        guard history.current.schemaVersion == 1, history.current.color.underwaterMappingVersion == 1 else {
+        guard (1...2).contains(history.current.schemaVersion),
+              (history.current.rendererVersion ?? 1) == history.current.schemaVersion,
+              history.current.color.underwaterMappingVersion == 1 else {
             throw CocoaError(.fileReadCorruptFile)
         }
         return history

@@ -192,7 +192,8 @@ public struct EditRecipe: Codable, Equatable, Sendable {
     public init(sourcePath: String, kind: MediaKind) {
         self.sourcePath = sourcePath
         self.kind = kind
-        self.rendererVersion = 1
+        self.schemaVersion = 2
+        self.rendererVersion = 2
     }
 
     public var hasUnexportedEdits: Bool {
@@ -212,6 +213,16 @@ public struct EditHistory: Codable, Sendable {
     public private(set) var redoStack: [EditRecipe] = []
 
     public init(_ recipe: EditRecipe) { current = recipe }
+
+    public mutating func setSourceColor(_ descriptor: SourceColorDescriptor) {
+        current.sourceColor = descriptor
+        for index in undoStack.indices where undoStack[index].sourcePath == current.sourcePath {
+            undoStack[index].sourceColor = descriptor
+        }
+        for index in redoStack.indices where redoStack[index].sourcePath == current.sourcePath {
+            redoStack[index].sourceColor = descriptor
+        }
+    }
 
     public mutating func apply(_ update: (inout EditRecipe) -> Void) {
         var next = current

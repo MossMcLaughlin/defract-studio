@@ -77,13 +77,37 @@ final class EditorModel: ObservableObject {
                 let kind: MediaKind = ["mp4", "mov"].contains(url.pathExtension.lowercased()) ? .video : .photo
                 var recipe = EditRecipe(sourcePath: url.path, kind: kind)
                 recipe.sourceFileSize = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init)
+                if kind == .photo {
+                    do { recipe.sourceColor = try MediaIO.photoSourceColorDescriptor(url: url) }
+                    catch { self.error = "Source color metadata could not be read: \(error.localizedDescription)"; continue }
+                }
                 let history = EditHistory(recipe)
                 do {
                     try store.save(history)
                     items.append(history)
                     select(history.current.id)
+                    if kind == .video {
+                        scheduleVideoColorProbe(id: history.current.id, url: url, expectedSize: recipe.sourceFileSize)
+                    }
                 } catch { self.error = "Could not save the new edit session: \(error.localizedDescription)" }
             }
+        }
+    }
+
+    private func scheduleVideoColorProbe(id: UUID, url: URL, expectedSize: Int64?) {
+        Task {
+            do {
+                let descriptor = try await MediaIO.sourceColorDescriptor(url: url, kind: .video)
+                guard let index = items.firstIndex(where: { $0.current.id == id }),
+                      items[index].current.sourcePath == url.path,
+                      items[index].current.sourceFileSize == expectedSize else { return }
+                items[index].setSourceColor(descriptor)
+                if draft?.id == id { draft?.sourceColor = descriptor }
+                persist(index)
+                if descriptor.dynamicRange == .hlg || descriptor.dynamicRange == .pq {
+                    error = "This HDR source needs a verified SDR conversion before editing or export."
+                }
+            } catch { self.error = "Source color metadata could not be read: \(error.localizedDescription)" }
         }
     }
 
@@ -393,7 +417,14 @@ final class EditorModel: ObservableObject {
             error = "The selected file has a different size from the missing source. Choose the original file."
             return
         }
-        change { $0.sourcePath = url.path }
+        let kind = draft?.kind
+        let photoColor: SourceColorDescriptor?
+        if kind == .photo {
+            do { photoColor = try MediaIO.photoSourceColorDescriptor(url: url) }
+            catch { self.error = "Source color metadata could not be read: \(error.localizedDescription)"; return }
+        } else { photoColor = nil }
+        change { $0.sourcePath = url.path; $0.sourceColor = photoColor }
+        if kind == .video { scheduleVideoColorProbe(id: id, url: url, expectedSize: draft?.sourceFileSize) }
         select(id)
     }
 }

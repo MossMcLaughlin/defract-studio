@@ -6,7 +6,8 @@ import EditorCore
 final class CoreTests: XCTestCase {
     func testRendererVersionDefaultsAndLegacyDecode() throws {
         let current = EditRecipe(sourcePath: "/tmp/source.jpg", kind: .photo)
-        XCTAssertEqual(current.rendererVersion, 1)
+        XCTAssertEqual(current.schemaVersion, 2)
+        XCTAssertEqual(current.rendererVersion, 2)
         XCTAssertEqual(current.color.underwaterMappingVersion, 1)
         var object = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(current)) as? [String: Any])
         object.removeValue(forKey: "rendererVersion")
@@ -14,9 +15,53 @@ final class CoreTests: XCTestCase {
         object["schemaVersion"] = 1
         var legacy = try JSONDecoder().decode(EditRecipe.self, from: JSONSerialization.data(withJSONObject: object))
         XCTAssertNil(legacy.rendererVersion)
+        XCTAssertEqual(RenderPlan(recipe: legacy).version, 1)
         XCTAssertEqual(legacy.color.underwaterMappingVersion, 1)
         legacy.color.setEasy { $0.visibility = 100 }
         XCTAssertEqual(legacy.color.effective[.contrast], 12)
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let store = ProjectStore(directory: folder)
+        try store.save(EditHistory(legacy))
+        let reopened = try store.load(id: legacy.id).current
+        XCTAssertNil(reopened.rendererVersion)
+        XCTAssertEqual(reopened.color.effective, legacy.color.effective)
+        let source = CIImage(color: CIColor(red: 0.2, green: 0.4, blue: 0.8))
+            .cropped(to: CGRect(x: 0, y: 0, width: 2, height: 2))
+        let expected = CoreRenderer.render(source, color: reopened.color, masks: reopened.masks)
+        let actual = RenderPlan(recipe: reopened).grade(source)
+        let context = CIContext(options: [.workingColorSpace: CGColorSpace(name: CGColorSpace.sRGB)!])
+        let a = try XCTUnwrap(context.createCGImage(expected, from: expected.extent))
+        let b = try XCTUnwrap(context.createCGImage(actual, from: actual.extent))
+        XCTAssertEqual(Array(try XCTUnwrap(a.dataProvider?.data) as Data), Array(try XCTUnwrap(b.dataProvider?.data) as Data))
+    }
+    func testV2NeutralPlanAndSourceColorAcrossUndoAndStorage() throws {
+        let source = CIImage(color: CIColor(red: 0.2, green: 0.4, blue: 0.8))
+            .cropped(to: CGRect(x: 0, y: 0, width: 2, height: 2))
+        var history = EditHistory(EditRecipe(sourcePath: "/tmp/source.jpg", kind: .photo))
+        XCTAssertTrue(RenderPlan(recipe: history.current).grade(source) === source)
+        history.apply { $0.color.setEffective(.exposure, to: 0.5) }
+        let descriptor = SourceColorDescriptor(sourceBitDepth: 10, primaries: "ITU_R_709_2", transfer: "ITU_R_709_2",
+                                               fullRange: true, dynamicRange: .sdr, evidence: "fixture")
+        history.setSourceColor(descriptor)
+        history.undo()
+        XCTAssertEqual(history.current.sourceColor, descriptor)
+        history.redo()
+        XCTAssertEqual(history.current.sourceColor, descriptor)
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let store = ProjectStore(directory: folder)
+        try store.save(history)
+        let reopened = try store.load(id: history.current.id)
+        XCTAssertEqual(reopened.current.sourceColor, descriptor)
+        XCTAssertEqual(reopened.current.rendererVersion, 2)
+        XCTAssertEqual(reopened.current.color.manualDelta[.exposure], 0.5)
+        var relinked = reopened
+        relinked.apply { $0.sourcePath = "/tmp/relinked.jpg"; $0.sourceColor = nil }
+        let replacement = SourceColorDescriptor(sourceBitDepth: 8, dynamicRange: .sdr, evidence: "relink")
+        relinked.setSourceColor(replacement)
+        relinked.undo()
+        XCTAssertEqual(relinked.current.sourceColor, descriptor)
     }
     func testNeutralIdentity() {
         let source = CIImage(color: CIColor(red: 0.2, green: 0.4, blue: 0.8))

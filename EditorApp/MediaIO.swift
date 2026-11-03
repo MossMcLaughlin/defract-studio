@@ -7,6 +7,22 @@ import EditorCore
 
 enum MediaIO {
     static let context = CIContext(options: [.workingColorSpace: CGColorSpace(name: CGColorSpace.sRGB)!])
+    static let v2Context = CIContext(options: [
+        .workingColorSpace: CGColorSpace(name: CGColorSpace.extendedLinearSRGB)!,
+        .workingFormat: CIFormat.RGBAh
+    ])
+
+    static func context(for recipe: EditRecipe) -> CIContext {
+        RenderPlan(recipe: recipe).workingSpace == .legacySRGB ? context : v2Context
+    }
+
+    private static func validateInterpretation(_ recipe: EditRecipe) throws {
+        guard (recipe.rendererVersion ?? 1) == 2 else { return }
+        if recipe.sourceColor?.dynamicRange == .hlg || recipe.sourceColor?.dynamicRange == .pq {
+            throw NSError(domain: "Editor", code: 15, userInfo: [NSLocalizedDescriptionKey:
+                "HDR color conversion is not yet verified for this editor. The source was not graded or exported."])
+        }
+    }
     static let thumbnailCache: NSCache<NSString, CIImage> = {
         let cache = NSCache<NSString, CIImage>()
         cache.countLimit = 6
@@ -14,22 +30,7 @@ enum MediaIO {
     }()
 
     static func sourceColorDescriptor(url: URL, kind: MediaKind) async throws -> SourceColorDescriptor {
-        if kind == .photo {
-            guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
-                  let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [String: Any] else {
-                throw NSError(domain: "Editor", code: 13, userInfo: [NSLocalizedDescriptionKey: "Photo color metadata could not be read."])
-            }
-            let image = CGImageSourceCreateImageAtIndex(source, 0, nil)
-            let profile = image?.colorSpace.flatMap { space -> String? in
-                if let name = space.name { return name as String }
-                return space.copyICCData() != nil ? "embedded ICC" : nil
-            }
-            let depth = properties[kCGImagePropertyDepth as String] as? Int
-            return SourceColorDescriptor(sourceBitDepth: depth, profile: profile,
-                                         dynamicRange: .sdr,
-                                         orientation: properties[kCGImagePropertyOrientation as String] as? Int,
-                                         evidence: profile == nil ? "ImageIO; untagged SDR assumption" : "ImageIO embedded color space")
-        }
+        if kind == .photo { return try photoSourceColorDescriptor(url: url) }
         let asset = AVURLAsset(url: url)
         guard let track = try await asset.loadTracks(withMediaType: .video).first,
               let format = try await track.load(.formatDescriptions).first else {
@@ -49,6 +50,23 @@ enum MediaIO {
         return SourceColorDescriptor(sourceBitDepth: depth, primaries: primaries, transfer: transfer,
                                      matrix: matrix, fullRange: range, dynamicRange: dynamicRange,
                                      evidence: "CoreMedia format description")
+    }
+
+    static func photoSourceColorDescriptor(url: URL) throws -> SourceColorDescriptor {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [String: Any] else {
+            throw NSError(domain: "Editor", code: 13, userInfo: [NSLocalizedDescriptionKey: "Photo color metadata could not be read."])
+        }
+        let image = CGImageSourceCreateImageAtIndex(source, 0, nil)
+        let profile = image?.colorSpace.flatMap { space -> String? in
+            if let name = space.name { return name as String }
+            return space.copyICCData() != nil ? "embedded ICC" : nil
+        }
+        let depth = properties[kCGImagePropertyDepth as String] as? Int
+        return SourceColorDescriptor(sourceBitDepth: depth, profile: profile,
+                                     dynamicRange: .sdr,
+                                     orientation: properties[kCGImagePropertyOrientation as String] as? Int,
+                                     evidence: profile == nil ? "ImageIO; untagged SDR assumption" : "ImageIO embedded color space")
     }
 
     static func photoImage(url: URL) throws -> CIImage {
@@ -79,6 +97,7 @@ enum MediaIO {
     }
 
     static func photoPreviewCGImage(url: URL, recipe: EditRecipe, selectedMaskID: UUID? = nil, maxPixelSize: Int = 1800) throws -> CGImage {
+        try validateInterpretation(recipe)
         let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate)?.timeIntervalSince1970 ?? 0
         let key = "\(url.path):\(modified):\(maxPixelSize)" as NSString
         let sourceImage: CIImage
@@ -96,8 +115,9 @@ enum MediaIO {
             sourceImage = CIImage(cgImage: thumbnail)
             thumbnailCache.setObject(sourceImage, forKey: key)
         }
-        let graded = CoreRenderer.render(sourceImage, color: recipe.color, masks: recipe.masks)
-        let cropped = CoreRenderer.applyGeometry(overlay(graded, recipe: recipe, selectedMaskID: selectedMaskID), geometry: recipe.geometry)
+        let plan = RenderPlan(recipe: recipe)
+        let graded = plan.grade(sourceImage)
+        let cropped = plan.applyGeometry(overlay(graded, recipe: recipe, selectedMaskID: selectedMaskID))
         var previewFrame = recipe.outputFrame
         if var frame = previewFrame, max(frame.width, frame.height) > maxPixelSize {
             let scale = Double(maxPixelSize) / Double(max(frame.width, frame.height))
@@ -106,7 +126,11 @@ enum MediaIO {
             previewFrame = frame
         }
         let rendered = CoreRenderer.applyOutputFrame(cropped, frame: previewFrame)
-        guard let cg = context.createCGImage(rendered, from: rendered.extent) else {
+        let cg = (recipe.rendererVersion ?? 1) == 1
+            ? context.createCGImage(rendered, from: rendered.extent)
+            : v2Context.createCGImage(rendered, from: rendered.extent, format: .RGBA8,
+                                      colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!)
+        guard let cg else {
             throw NSError(domain: "Editor", code: 2, userInfo: [NSLocalizedDescriptionKey: "Image could not be rendered."])
         }
         return cg
@@ -114,15 +138,17 @@ enum MediaIO {
 
     static func exportPhoto(url: URL, to destination: URL, recipe: EditRecipe,
                             format: PhotoFormat = .jpeg, quality: Double = 0.9, overwrite: Bool = false) throws {
+        try validateInterpretation(recipe)
         guard url.standardizedFileURL != destination.standardizedFileURL else {
             throw NSError(domain: "Editor", code: 9, userInfo: [NSLocalizedDescriptionKey: "The export destination is the original file."])
         }
-        let cropped = CoreRenderer.applyGeometry(CoreRenderer.render(try photoImage(url: url), color: recipe.color, masks: recipe.masks), geometry: recipe.geometry)
-        let rendered = CoreRenderer.applyOutputFrame(cropped, frame: recipe.outputFrame)
+        let plan = RenderPlan(recipe: recipe)
+        let cropped = plan.applyGeometry(plan.grade(try photoImage(url: url)))
+        let rendered = plan.applyOutputFrame(cropped)
         let temporary = destination.deletingLastPathComponent().appendingPathComponent(UUID().uuidString + "." + format.fileExtension)
         defer { try? FileManager.default.removeItem(at: temporary) }
         guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
-              let cg = context.createCGImage(rendered, from: rendered.extent, format: .RGBA8, colorSpace: colorSpace),
+              let cg = context(for: recipe).createCGImage(rendered, from: rendered.extent, format: .RGBA8, colorSpace: colorSpace),
               let output = CGImageDestinationCreateWithURL(temporary as CFURL, format.imageIOType as CFString, 1, nil) else {
             throw NSError(domain: "Editor", code: 3, userInfo: [NSLocalizedDescriptionKey: "Photo export could not start."])
         }
@@ -148,11 +174,14 @@ enum MediaIO {
     }
 
     static func videoComposition(asset: AVURLAsset, recipe: EditRecipe, selectedMaskID: UUID? = nil) async throws -> AVVideoComposition {
-        try await withCheckedThrowingContinuation { continuation in
+        try validateInterpretation(recipe)
+        let plan = RenderPlan(recipe: recipe)
+        let renderContext = context(for: recipe)
+        return try await withCheckedThrowingContinuation { continuation in
             AVMutableVideoComposition.videoComposition(with: asset, applyingCIFiltersWithHandler: { request in
-                let graded = CoreRenderer.render(request.sourceImage, color: recipe.color, masks: recipe.masks)
-                let framed = CoreRenderer.applyGeometry(overlay(graded, recipe: recipe, selectedMaskID: selectedMaskID), geometry: recipe.geometry)
-                request.finish(with: CoreRenderer.applyOutputFrame(framed, frame: recipe.outputFrame), context: context)
+                let graded = plan.grade(request.sourceImage)
+                let framed = plan.applyGeometry(overlay(graded, recipe: recipe, selectedMaskID: selectedMaskID))
+                request.finish(with: plan.applyOutputFrame(framed), context: renderContext)
             }, completionHandler: { composition, error in
                 if let composition {
                     let output = recipe.outputFrame.map { CGSize(width: $0.width, height: $0.height) }

@@ -2,6 +2,8 @@
 
 ## Core rule
 
+New imports now store schema/renderer version 2 and source-color evidence; existing schema-1 recipes stay on renderer 1. Both versions still use the v1 Easy mapping and creative color formulas at this checkpoint. Renderer 2 establishes an extended-linear-sRGB RGBAh Core Image working context and a neutral stage contract for future source protection and output mapping. This version boundary does not yet claim improved color quality, HDR/Log conversion, or new controls.
+
 There is **one actual set of color adjustments**. Easy slider coordinates contribute a deterministic `base` vector; Advanced edits contribute a `manualDelta` vector. The renderer and Advanced UI use `effective = clamp(base + manualDelta, parameterAllowedRange)`. The stored, unclamped delta remains intact to allow reversal of an Easy change; numeric Advanced controls show the **clamped rendered value**. A new Advanced target sets `manualDelta = requestedEffective - currentBase`. Switching tabs never changes results. Store Easy controls + manual deltas + masks; don't overwrite manual values on Easy movement.
 
 All Easy parameters start at neutral. Each Easy component should derive from its absolute slider position, **not accumulate incremental floating-point changes**. Contribution vectors add together so overlapping edits remain predictable. Map formulas versioned as `underwaterMappingVersion: 1` in the saved recipe, permitting later recalibration/migration; saved project output must not suddenly change when a new mapping is installed (persist evaluated base or a versioned mapping implementation).

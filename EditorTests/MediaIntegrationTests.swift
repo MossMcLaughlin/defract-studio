@@ -46,6 +46,56 @@ final class MediaIntegrationTests: XCTestCase {
         XCTAssertNotNil(still.profile)
     }
 
+    @MainActor func testImportedPhotoAndVideoInterpretationPersists() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let store = ProjectStore(directory: folder)
+        let model = EditorModel(store: store)
+        let photo = fixtures.appendingPathComponent("test_media/photos/P8110319.JPG")
+        let video = fixtures.appendingPathComponent("test_media/videos/GX011247.MP4")
+        model.importURLs([photo, video])
+        let photoRecipe = try XCTUnwrap(model.items.first { $0.current.sourcePath == photo.path }?.current)
+        XCTAssertEqual(photoRecipe.rendererVersion, 2)
+        XCTAssertEqual(photoRecipe.sourceColor?.dynamicRange, .sdr)
+        for _ in 0..<50 {
+            if model.items.first(where: { $0.current.sourcePath == video.path })?.current.sourceColor != nil { break }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        let videoRecipe = try XCTUnwrap(model.items.first { $0.current.sourcePath == video.path }?.current)
+        XCTAssertEqual(videoRecipe.rendererVersion, 2)
+        XCTAssertEqual(videoRecipe.sourceColor?.sourceBitDepth, 10)
+        XCTAssertEqual(videoRecipe.sourceColor?.dynamicRange, .sdr)
+        XCTAssertEqual(try store.load(id: photoRecipe.id).current.sourceColor, photoRecipe.sourceColor)
+        XCTAssertEqual(try store.load(id: videoRecipe.id).current.sourceColor, videoRecipe.sourceColor)
+    }
+
+    func testNeutralV2PhotoMatchesLegacySDRBaseline() throws {
+        let source = fixtures.appendingPathComponent("test_media/photos/P8110319.JPG")
+        let current = EditRecipe(sourcePath: source.path, kind: .photo)
+        var legacy = current
+        legacy.schemaVersion = 1
+        legacy.rendererVersion = nil
+        let v2 = try MediaIO.photoPreviewCGImage(url: source, recipe: current)
+        let v1 = try MediaIO.photoPreviewCGImage(url: source, recipe: legacy)
+        XCTAssertEqual(v2.width, v1.width)
+        XCTAssertEqual(v2.height, v1.height)
+        // V1's untagged device-RGB preview and V2's tagged sRGB preview can
+        // display-convert differently; compare their encoded pixel codes here.
+        let a = NSBitmapImageRep(cgImage: v1)
+        let b = NSBitmapImageRep(cgImage: v2)
+        var difference = 0.0
+        for y in 1...8 {
+            for x in 1...8 {
+                let first = try XCTUnwrap(a.colorAt(x: x * (a.pixelsWide - 1) / 9, y: y * (a.pixelsHigh - 1) / 9))
+                let second = try XCTUnwrap(b.colorAt(x: x * (b.pixelsWide - 1) / 9, y: y * (b.pixelsHigh - 1) / 9))
+                difference += abs(first.redComponent - second.redComponent)
+                    + abs(first.greenComponent - second.greenComponent)
+                    + abs(first.blueComponent - second.blueComponent)
+            }
+        }
+        XCTAssertLessThan(difference / (64 * 3), 0.001)
+    }
+
     func testPhotoGradeAndExportPreserveOriginal() throws {
         let source = fixtures.appendingPathComponent("test_media/photos/P8110319.JPG")
         let before = try checksum(source)
