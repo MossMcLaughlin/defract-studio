@@ -8,7 +8,7 @@ import EditorCore
 struct EditorApp: App {
     @NSApplicationDelegateAdaptor(EditorApplicationDelegate.self) private var applicationDelegate
     var body: some Scene {
-        WindowGroup("Photo & Video Editor") {
+        WindowGroup("Defract Studio") {
             EditorView()
                 .frame(minWidth: 900, minHeight: 600)
         }
@@ -40,7 +40,7 @@ struct EditorView: View {
             }
         }
         .preferredColorScheme(.dark)
-        .background(Color(red: 0.08, green: 0.09, blue: 0.09))
+        .background(EditorTheme.canvas)
         .alert("Editor notice", isPresented: Binding(get: { model.error != nil }, set: { if !$0 { model.error = nil } })) {
             Button("OK") { model.error = nil }
             if model.draft != nil { Button("Relink…") { model.error = nil; model.relink() } }
@@ -54,27 +54,42 @@ struct EditorView: View {
     }
 
     private var toolbar: some View {
-        HStack(spacing: 14) {
-            if !sidebarVisible { Button("Show Files") { sidebarVisible = true }.accessibilityLabel("Show Files") }
-            Button("Undo", action: model.undo).disabled(!model.canUndo).keyboardShortcut("z", modifiers: .command)
-            Button("Redo", action: model.redo).disabled(!model.canRedo).keyboardShortcut("z", modifiers: [.command, .shift])
-            Button(model.showingOriginal ? "Show Edited" : "Before/After") { model.showingOriginal.toggle(); model.refresh() }
-                .disabled(model.draft == nil)
-            Button(model.cropEditing ? "Done Cropping" : "Crop & Rotate") { resetZoom(); model.toggleCropEditing() }
-                .disabled(model.draft == nil)
-            Spacer()
-            Text("Photo & Video Editor").font(.headline).foregroundStyle(.secondary)
+        HStack(spacing: 8) {
+            if !sidebarVisible {
+                Button { sidebarVisible = true } label: { Label("Show Files", systemImage: "sidebar.left") }
+                    .help("Show Files").accessibilityLabel("Show Files")
+            }
+            Button(action: model.undo) { Label("Undo", systemImage: "arrow.uturn.backward") }
+                .disabled(!model.canUndo).keyboardShortcut("z", modifiers: .command).help("Undo")
+            Button(action: model.redo) { Label("Redo", systemImage: "arrow.uturn.forward") }
+                .disabled(!model.canRedo).keyboardShortcut("z", modifiers: [.command, .shift]).help("Redo")
+            Rectangle().fill(EditorTheme.divider).frame(width: 1, height: 20).padding(.horizontal, 5)
+            Button { model.showingOriginal.toggle(); model.refresh() } label: {
+                Label(model.showingOriginal ? "Show Edited" : "Before/After", systemImage: "rectangle.split.2x1")
+            }
+                .disabled(model.draft == nil).help("Toggle original and edited preview")
+            Button { resetZoom(); model.toggleCropEditing() } label: {
+                Label(model.cropEditing ? "Done Cropping" : "Crop & Rotate", systemImage: "crop.rotate")
+            }
+                .disabled(model.draft == nil).help("Crop and rotate")
             Spacer()
             if model.busy { ProgressView().controlSize(.small) }
-            Button("Export…") { model.exportSheetRequested = true }
+            Button { model.exportSheetRequested = true } label: {
+                Label("Export…", systemImage: "square.and.arrow.up")
+                    .foregroundStyle(EditorTheme.canvas)
+                    .padding(.horizontal, 13).padding(.vertical, 8)
+                    .background(EditorTheme.gold, in: RoundedRectangle(cornerRadius: 7))
+            }
                 .disabled(model.draft == nil || model.busy || model.sourceSize == .zero)
                 .keyboardShortcut("e", modifiers: .command)
-                .tint(Color(red: 0.82, green: 0.63, blue: 0.22))
+                .buttonStyle(.plain).help("Export selected file")
         }
-        .buttonStyle(.bordered)
+        .buttonStyle(.plain)
+        .font(EditorTheme.control)
+        .foregroundStyle(EditorTheme.primaryText)
         .padding(.horizontal, 12)
-        .frame(height: 52)
-        .background(Color(red: 0.13, green: 0.15, blue: 0.15))
+        .frame(height: 50)
+        .background(EditorTheme.toolbar)
     }
 
     private var sidebar: some View {
@@ -99,7 +114,7 @@ struct EditorView: View {
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(6)
-                        .background(model.selectedID == recipe.id ? Color.blue.opacity(0.3) : .clear)
+                        .background(model.selectedID == recipe.id ? EditorTheme.pacific.opacity(0.45) : .clear)
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("Select \(URL(fileURLWithPath: recipe.sourcePath).lastPathComponent)")
@@ -108,7 +123,7 @@ struct EditorView: View {
             }
         }
         .frame(width: 128)
-        .background(Color(red: 0.13, green: 0.15, blue: 0.15))
+        .background(EditorTheme.panel)
     }
 
     private var preview: some View {
@@ -184,17 +199,34 @@ struct EditorView: View {
                     .font(.title2)
             } else { ProgressView() }
             Spacer(minLength: 0)
-            if model.kind == .video { videoControls }
+            if model.kind == .video {
+                videoControls
+                HStack { Spacer(); mediaDimensions }
+            }
             else if model.kind == .photo {
                 HStack {
                     Button("Fit") { resetZoom() }
                     Slider(value: $zoom, in: 1...4).frame(width: 120)
                     Text(zoom == 1 ? "Fit" : String(format: "%.1f× Fit", zoom))
-                }.font(.caption)
+                    Spacer(minLength: 6)
+                    mediaDimensions
+                }.font(EditorTheme.control).tint(EditorTheme.gold)
             }
         }
         .padding(12)
-        .background(Color(red: 0.08, green: 0.09, blue: 0.09))
+        .background(EditorTheme.canvas)
+    }
+
+    private var mediaDimensions: some View {
+        Group {
+            if model.sourceSize.width > 0, model.sourceSize.height > 0 {
+                Text("\(Int(model.sourceSize.width.rounded())) × \(Int(model.sourceSize.height.rounded()))")
+                    .font(EditorTheme.helper.monospacedDigit())
+                    .foregroundStyle(EditorTheme.secondaryText)
+                    .lineLimit(1)
+                    .help("Display-oriented source dimensions in pixels")
+            }
+        }
     }
 
     private var videoControls: some View {
@@ -216,38 +248,39 @@ struct EditorView: View {
                 }), in: min(model.duration, (model.draft?.videoTrim.startSeconds ?? 0) + 0.05)...max(model.duration, 0.05), onEditingChanged: { editing in editing ? model.beginGesture() : model.endGesture() })
             }.font(.caption)
         }
+        .tint(EditorTheme.gold)
+        .font(EditorTheme.control)
         .onReceive(Timer.publish(every: 0.2, on: .main, in: .common).autoconnect()) { _ in
             if let seconds = model.player?.currentTime().seconds, seconds.isFinite { model.seconds = seconds }
         }
     }
 
     private var inspector: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Picker("Inspector", selection: $inspectorTab) {
-                Text("Global").tag("Global")
-                Text("Masks").tag("Masks")
-            }.pickerStyle(.segmented)
+        VStack(alignment: .leading, spacing: 12) {
+            EditorTabs(selection: $inspectorTab, names: ["Global", "Masks"], symbols: ["slider.horizontal.3", "circle.dotted.circle"], primary: true)
             .onChange(of: inspectorTab) { _, mode in model.maskPanelActive = mode == "Masks"; model.refresh() }
-            if model.draft == nil { Text("Import a file to begin.").foregroundStyle(.secondary) }
+            if model.draft == nil { Text("Import a file to begin.").foregroundStyle(EditorTheme.secondaryText) }
             else if inspectorTab == "Masks" { MaskInspector(model: model) }
             else {
-                Picker("Controls", selection: $inspectorMode) {
-                    Text("Easy").tag("Easy")
-                    Text("Advanced").tag("Advanced")
-                }.pickerStyle(.segmented)
+                EditorTabs(selection: $inspectorMode, names: ["Easy", "Advanced"], primary: false)
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 14) {
+                    VStack(alignment: .leading, spacing: 16) {
                         if inspectorMode == "Easy" { easyInspector }
                         else { advancedInspector }
                         if model.kind != nil { cropInspector }
-                        Divider()
-                        Menu("More") { Button("Reset All Global Color…") { confirmReset = true } }
-                    }.padding(.vertical, 6)
+                        if inspectorMode == "Advanced" {
+                            Divider().overlay(EditorTheme.divider)
+                            resetTextButton("Reset All Global Color…") { confirmReset = true }
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, 10)
+                    .padding(.trailing, 28)
                 }
             }
         }
-        .padding(14)
-        .background(Color(red: 0.13, green: 0.15, blue: 0.15))
+        .padding(.leading, 16).padding(.trailing, 8).padding(.vertical, 14)
+        .background(EditorTheme.panel)
     }
 
     private func brushPoint(_ location: CGPoint, viewSize: CGSize, imageSize: NSSize) -> NormalizedPoint? {
@@ -305,23 +338,39 @@ struct EditorView: View {
     }
 
     private var easyInspector: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            sectionHeader("Underwater Easy", help: "Reset Easy sliders") { model.change { $0.color.resetEasy() } }
-            easySlider("Water Color", \.waterColor, range: -100...100, hint: "Deepen Blue|Remove Green")
-            easySlider("Color Recovery", \.colorRecovery, range: 0...100)
-            easySlider("Light", \.light, range: -100...100)
-            easySlider("Visibility", \.visibility, range: 0...100)
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(spacing: 8) {
+                Image(systemName: "water.waves").foregroundStyle(EditorTheme.pacific)
+                Text("Underwater Easy").font(EditorTheme.heading)
+                Spacer()
+                Image(systemName: "info.circle").foregroundStyle(EditorTheme.secondaryText)
+                    .help("Guided color controls. Manual Advanced refinements are preserved.")
+                    .accessibilityLabel("Underwater Easy information")
+            }
+            Text("Quick adjustments for underwater photos. Balance color, light, and visibility in a few steps.")
+                .font(EditorTheme.helper).foregroundStyle(EditorTheme.secondaryText)
+                .fixedSize(horizontal: false, vertical: true)
+            easySlider("Water Color", \.waterColor, range: -100...100,
+                       description: "Balance blue and green casts.", endpoints: ("Deepen Blue", "Remove Green"))
+            easySlider("Color Recovery", \.colorRecovery, range: 0...100,
+                       description: "Restore natural warmth and color in subjects and reefs.")
+            easySlider("Light", \.light, range: -100...100,
+                       description: "Adjust exposure while keeping highlights and shadows balanced.")
+            easySlider("Visibility", \.visibility, range: 0...100,
+                       description: "Improve contrast and clarity in hazy water.")
             if model.draft?.color.manualDelta.isNeutral == false {
                 Text(shownManualHelp ? "Customized in Advanced" : "Manual refinements are preserved when you change Easy controls. Start with Easy and finish with Advanced.")
-                    .font(.caption).foregroundStyle(.secondary)
+                    .font(EditorTheme.helper).foregroundStyle(EditorTheme.secondaryText)
                     .onAppear { shownManualHelp = true }
             }
+            Divider().overlay(EditorTheme.divider)
+            resetTextButton("Reset Underwater Easy") { model.change { $0.color.resetEasy() } }
         }
     }
 
     private var cropInspector: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Divider()
+            Divider().overlay(EditorTheme.divider)
             sectionHeader("Crop & Rotate", help: "Reset crop and rotation") { model.change { $0.geometry = Geometry() } }
             Picker("Aspect", selection: Binding(get: { model.draft?.geometry.aspect ?? .original }, set: { value in
                 model.change { $0.geometry.aspect = value }
@@ -333,25 +382,30 @@ struct EditorView: View {
                 Slider(value: Binding(get: { model.draft?.geometry.freeWidth ?? 1 }, set: { value in
                     model.change { $0.geometry.freeWidth = value }
                 }), in: 0.1...1, onEditingChanged: { editing in editing ? model.beginGesture() : model.endGesture() })
+                    .modifier(GoldSliderTrack(value: model.draft?.geometry.freeWidth ?? 1, range: 0.1...1))
                 Text("Crop height")
                 Slider(value: Binding(get: { model.draft?.geometry.freeHeight ?? 1 }, set: { value in
                     model.change { $0.geometry.freeHeight = value }
                 }), in: 0.1...1, onEditingChanged: { editing in editing ? model.beginGesture() : model.endGesture() })
+                    .modifier(GoldSliderTrack(value: model.draft?.geometry.freeHeight ?? 1, range: 0.1...1))
             } else if model.draft?.geometry.aspect != .original {
                 Text("Crop size")
                 Slider(value: Binding(get: { model.draft?.geometry.cropScale ?? 1 }, set: { value in
                     model.change { $0.geometry.cropScale = value }
                 }), in: 0.1...1, onEditingChanged: { editing in editing ? model.beginGesture() : model.endGesture() })
+                    .modifier(GoldSliderTrack(value: model.draft?.geometry.cropScale ?? 1, range: 0.1...1))
             }
             if model.draft?.geometry.aspect != .original {
                 Text("Horizontal position")
                 Slider(value: Binding(get: { model.draft?.geometry.centerX ?? 0.5 }, set: { value in
                     model.change { $0.geometry.centerX = value }
                 }), in: 0...1, onEditingChanged: { editing in editing ? model.beginGesture() : model.endGesture() })
+                    .modifier(GoldSliderTrack(value: model.draft?.geometry.centerX ?? 0.5, range: 0...1))
                 Text("Vertical position")
                 Slider(value: Binding(get: { model.draft?.geometry.centerY ?? 0.5 }, set: { value in
                     model.change { $0.geometry.centerY = value }
                 }), in: 0...1, onEditingChanged: { editing in editing ? model.beginGesture() : model.endGesture() })
+                    .modifier(GoldSliderTrack(value: model.draft?.geometry.centerY ?? 0.5, range: 0...1))
             }
             HStack {
                 Button("Rotate Left") { model.change { $0.geometry.rotateQuarterTurns -= 1 } }
@@ -361,65 +415,65 @@ struct EditorView: View {
             Slider(value: Binding(get: { model.draft?.geometry.straightenDegrees ?? 0 }, set: { value in
                 model.change { $0.geometry.straightenDegrees = value }
             }), in: -20...20, onEditingChanged: { editing in editing ? model.beginGesture() : model.endGesture() })
+                .modifier(GoldSliderTrack(value: model.draft?.geometry.straightenDegrees ?? 0, range: -20...20))
         }
+        .font(EditorTheme.control)
+        .foregroundStyle(EditorTheme.primaryText)
+        .tint(EditorTheme.gold)
     }
 
-    private func easySlider(_ title: String, _ key: WritableKeyPath<EasySettings, Double>, range: ClosedRange<Double>, hint: String? = nil) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            HStack { Text(title); Spacer(); Text("\(Int(model.draft?.color.easy[keyPath: key] ?? 0))").monospacedDigit() }
-            Slider(value: Binding(get: { model.draft?.color.easy[keyPath: key] ?? 0 }, set: { value in
+    private func easySlider(_ title: String, _ key: WritableKeyPath<EasySettings, Double>, range: ClosedRange<Double>,
+                            description: String, endpoints: (String, String)? = nil) -> some View {
+        InspectorSliderRow(title: title, value: String(format: "%+.0f", model.draft?.color.easy[keyPath: key] ?? 0),
+                           selection: Binding(get: { model.draft?.color.easy[keyPath: key] ?? 0 }, set: { value in
                 model.change { $0.color.setEasy { $0[keyPath: key] = value.rounded() } }
-            }), in: range, onEditingChanged: { editing in editing ? model.beginGesture() : model.endGesture() })
-                .accessibilityLabel(title)
-            if let hint {
-                let labels = hint.split(separator: "|")
-                HStack { Text(String(labels[0])); Spacer(); Text(String(labels.count > 1 ? labels[1] : "")) }
-                    .font(.caption2).foregroundStyle(.secondary)
-            }
-        }
+            }), range: range, onEditingChanged: { editing in editing ? model.beginGesture() : model.endGesture() },
+                           description: description, endpoints: endpoints)
     }
 
     private var advancedInspector: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 12) {
             sectionHeader("Light", help: "Reset manual Light adjustments") { model.change { $0.color.resetManual([.exposure, .contrast, .highlights, .shadows, .whites, .blacks]) } }
             ForEach([Parameter.exposure, .contrast, .highlights, .shadows, .whites, .blacks], id: \.self) { parameter in advancedSlider(parameter) }
-            Divider()
+            Divider().overlay(EditorTheme.divider)
             sectionHeader("Color", help: "Reset manual Color adjustments") { model.change { $0.color.resetManual([.temperature, .tint, .saturation, .vibrance]) } }
             ForEach([Parameter.temperature, .tint, .saturation, .vibrance], id: \.self) { parameter in advancedSlider(parameter) }
-            Divider()
+            Divider().overlay(EditorTheme.divider)
             sectionHeader("Color Mixer", help: "Reset all manual Color Mixer adjustments") { model.change { $0.color.resetManual(Array(Parameter.allCases.dropFirst(10))) } }
             MixerBandPicker(selection: $selectedBand)
             Text("Positive Green Hue moves toward Aqua; positive Aqua Hue moves toward Blue.")
-                .font(.caption2).foregroundStyle(.secondary)
+                .font(EditorTheme.helper).foregroundStyle(EditorTheme.secondaryText)
             let parameters = Array(Parameter.allCases.dropFirst(10))
             ForEach(parameters[(selectedBand * 3)..<(selectedBand * 3 + 3)], id: \.self) { parameter in advancedSlider(parameter, mixer: true) }
         }
     }
 
     private func advancedSlider(_ parameter: Parameter, mixer: Bool = false) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            HStack {
-                Text(mixer ? String(parameter.title.split(separator: " ").last ?? "") : parameter.title)
-                    .onTapGesture(count: 2) { model.change { $0.color.setEffective(parameter, to: $0.color.base[parameter]) } }
-                Spacer()
-                Text(parameter == .exposure ? String(format: "%.2f", model.draft?.color.effective[parameter] ?? 0) : String(format: "%.0f", model.draft?.color.effective[parameter] ?? 0))
-                    .monospacedDigit()
-            }
-            Slider(value: Binding(get: { model.draft?.color.effective[parameter] ?? 0 }, set: { value in
+        InspectorSliderRow(title: mixer ? String(parameter.title.split(separator: " ").last ?? "") : parameter.title,
+                           value: parameter == .exposure ? String(format: "%+.2f", model.draft?.color.effective[parameter] ?? 0) : String(format: "%+.0f", model.draft?.color.effective[parameter] ?? 0),
+                           selection: Binding(get: { model.draft?.color.effective[parameter] ?? 0 }, set: { value in
                 model.change { $0.color.setEffective(parameter, to: value) }
-            }), in: parameter.limits, onEditingChanged: { editing in editing ? model.beginGesture() : model.endGesture() })
-                .accessibilityLabel(parameter.title)
-            if mixer && parameter.rawValue.hasSuffix("Hue") { MixerHueGuide(band: selectedBand) }
-        }
+            }), range: parameter.limits, onEditingChanged: { editing in editing ? model.beginGesture() : model.endGesture() },
+                           accessibilityLabel: parameter.title,
+                           onLabelDoubleClick: { model.change { $0.color.setEffective(parameter, to: $0.color.base[parameter]) } },
+                           hueGuideBand: mixer && parameter.rawValue.hasSuffix("Hue") ? selectedBand : nil)
     }
 
     private func sectionHeader(_ title: String, help: String, action: @escaping () -> Void) -> some View {
         HStack {
-            Text(title).font(.headline)
+            Text(title).font(EditorTheme.heading).foregroundStyle(EditorTheme.primaryText)
             Spacer()
             Button(action: action) { Image(systemName: "arrow.counterclockwise").font(.caption) }
-                .buttonStyle(.borderless).help(help).accessibilityLabel(help)
+                .buttonStyle(.plain).foregroundStyle(EditorTheme.gold)
+                .frame(width: 28, height: 28).help(help).accessibilityLabel(help)
         }
+    }
+
+    private func resetTextButton(_ title: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) { Label(title, systemImage: "arrow.counterclockwise")
+            .font(EditorTheme.control).frame(maxWidth: .infinity, alignment: .leading) }
+            .buttonStyle(.plain).foregroundStyle(EditorTheme.gold).padding(.vertical, 4)
+            .help(title)
     }
 }
 
@@ -441,6 +495,114 @@ struct MixerBandPicker: View {
                     .accessibilityAddTraits(selection == index ? .isSelected : [])
             }
         }
+    }
+}
+
+enum EditorTheme {
+    static let canvas = Color(red: 11 / 255, green: 11 / 255, blue: 10 / 255)
+    static let toolbar = Color(red: 0.09, green: 0.10, blue: 0.10)
+    static let panel = Color(red: 0.13, green: 0.14, blue: 0.14)
+    static let raised = Color(red: 0.18, green: 0.19, blue: 0.19)
+    static let primaryText = Color(red: 246 / 255, green: 242 / 255, blue: 233 / 255)
+    static let secondaryText = Color(red: 174 / 255, green: 179 / 255, blue: 174 / 255)
+    static let gold = Color(red: 208 / 255, green: 160 / 255, blue: 55 / 255)
+    static let pacific = Color(red: 45 / 255, green: 112 / 255, blue: 143 / 255)
+    static let divider = Color.white.opacity(0.12)
+    static let heading = Font.system(size: 17, weight: .semibold)
+    static let control = Font.system(size: 13, weight: .medium)
+    static let value = Font.system(size: 13, weight: .medium).monospacedDigit()
+    static let helper = Font.system(size: 11, weight: .regular)
+}
+
+struct EditorTabs: View {
+    @Binding var selection: String
+    let names: [String]
+    var symbols: [String] = []
+    var primary = false
+
+    var body: some View {
+        HStack(spacing: 0) {
+            ForEach(names.indices, id: \.self) { index in
+                let name = names[index]
+                Button { selection = name } label: {
+                    HStack(spacing: 7) {
+                        if symbols.indices.contains(index) { Image(systemName: symbols[index]) }
+                        Text(name)
+                    }
+                    .font(EditorTheme.control)
+                    .foregroundStyle(selection == name && primary ? EditorTheme.gold : EditorTheme.primaryText)
+                    .frame(maxWidth: .infinity, minHeight: primary ? 42 : 32)
+                    .background {
+                        if !primary && selection == name { RoundedRectangle(cornerRadius: 7).fill(EditorTheme.pacific) }
+                    }
+                    .overlay(alignment: .bottom) {
+                        if primary && selection == name { EditorTheme.gold.frame(height: 2) }
+                    }
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(name)
+                .accessibilityAddTraits(selection == name ? .isSelected : [])
+            }
+        }
+        .padding(primary ? 0 : 3)
+        .background(EditorTheme.raised, in: RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+struct InspectorSliderRow: View {
+    let title: String
+    let value: String
+    let selection: Binding<Double>
+    let range: ClosedRange<Double>
+    let onEditingChanged: (Bool) -> Void
+    var accessibilityLabel: String? = nil
+    var description: String? = nil
+    var endpoints: (String, String)? = nil
+    var onLabelDoubleClick: (() -> Void)? = nil
+    var hueGuideBand: Int? = nil
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(title).font(EditorTheme.control)
+                    .onTapGesture(count: 2) { onLabelDoubleClick?() }
+                Spacer()
+                Text(value).font(EditorTheme.value)
+            }
+            .foregroundStyle(EditorTheme.primaryText)
+            Slider(value: selection, in: range, onEditingChanged: onEditingChanged)
+                .modifier(GoldSliderTrack(value: selection.wrappedValue, range: range))
+                .accessibilityLabel(accessibilityLabel ?? title)
+            if let endpoints {
+                HStack { Text(endpoints.0); Spacer(); Text(endpoints.1) }
+                    .font(EditorTheme.helper).foregroundStyle(EditorTheme.secondaryText)
+            }
+            if let hueGuideBand { MixerHueGuide(band: hueGuideBand) }
+            if let description {
+                Text(description).font(EditorTheme.helper).foregroundStyle(EditorTheme.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+}
+
+struct GoldSliderTrack: ViewModifier {
+    let value: Double
+    let range: ClosedRange<Double>
+
+    func body(content: Content) -> some View {
+        content.tint(EditorTheme.gold)
+            .overlay {
+                GeometryReader { geometry in
+                    let fraction = CGFloat(min(1, max(0, (value - range.lowerBound) / (range.upperBound - range.lowerBound))))
+                    let width = max(0, (geometry.size.width - 20) * fraction - 10)
+                    Capsule().fill(EditorTheme.gold)
+                        .frame(width: width, height: 4)
+                        .position(x: 10 + width / 2, y: geometry.size.height / 2)
+                }
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+            }
     }
 }
 

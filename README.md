@@ -1,6 +1,6 @@
-# Photo & Video Editor
+# Defract Studio
 
-A local, native macOS editor for photos and single video clips. Edits are saved as metadata; imported originals stay untouched. Export creates a separate JPEG, PNG, or MP4.
+A local, native macOS editor for photos and single video clips. Edits are saved as metadata; imported originals stay untouched. Export creates a separate JPEG, PNG, or MP4. The Xcode target and app binary are still named `EditorApp`.
 
 ## Build and run
 
