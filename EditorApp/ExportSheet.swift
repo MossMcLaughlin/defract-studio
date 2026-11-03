@@ -81,7 +81,7 @@ struct ExportSheet: View {
         }
         .padding(20)
         .frame(width: 520)
-        .onAppear { model.previewExport(options.outputFrame) }
+        .onAppear { if !model.busy { model.lastExportURL = nil }; model.previewExport(options.outputFrame) }
         .onDisappear {
             model.clearExportPreview()
             if !model.busy && model.closeAfterExport {

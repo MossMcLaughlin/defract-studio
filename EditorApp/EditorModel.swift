@@ -16,7 +16,7 @@ final class EditorModel: ObservableObject {
     @Published var seconds = 0.0
     @Published var showingOriginal = false
     @Published var selectedMaskID: UUID?
-    @Published var overlayVisible = true
+    @Published var overlayVisible = false
     @Published var maskPanelActive = false
     @Published var brushOperation: BrushOperation = .add
     @Published var brushSize = 0.08
@@ -38,6 +38,7 @@ final class EditorModel: ObservableObject {
     private var subjectTask: Task<Data, Error>?
     private var exportTask: Task<Void, Never>?
     private var photoExportTask: Task<Void, Error>?
+    private var previewSourcePath: String?
 
     init(store: ProjectStore? = nil) {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -88,9 +89,11 @@ final class EditorModel: ObservableObject {
 
     func select(_ id: UUID) {
         guard let history = items.first(where: { $0.current.id == id }) else { return }
+        let changedSource = selectedID != id
         draft = history.current
         selectedMaskID = history.current.masks.first?.id
         cropEditing = false
+        if changedSource { lastExportURL = nil; exportProgress = 0; previewSourcePath = nil }
         UserDefaults.standard.set(id.uuidString, forKey: "selectedMediaID")
         refresh()
     }
@@ -101,6 +104,7 @@ final class EditorModel: ObservableObject {
     func endGesture() {
         if gestureStart != nil { commit() }
         gestureStart = nil
+        refresh()
     }
 
     func change(_ update: (inout EditRecipe) -> Void) {
@@ -135,6 +139,15 @@ final class EditorModel: ObservableObject {
         change { $0.masks.removeAll { $0.id == selectedMaskID } }
         self.selectedMaskID = draft?.masks.first?.id
         refresh()
+    }
+
+    func duplicateSelectedMaskAsInverse() {
+        guard let copy = selectedMask?.invertedCopy() else { return }
+        change { recipe in
+            guard let index = recipe.masks.firstIndex(where: { $0.id == selectedMaskID }) else { return }
+            recipe.masks.insert(copy, at: index + 1)
+        }
+        selectMask(copy.id)
     }
 
     func detectSubject() {
@@ -209,6 +222,19 @@ final class EditorModel: ObservableObject {
         catch { autosaveFailed = true; self.error = "Autosave failed; edits remain in memory. \(error.localizedDescription)" }
     }
 
+    func saveForClose() -> Bool {
+        if gestureStart != nil { endGesture() }
+        do {
+            for history in items { try store.save(history) }
+            autosaveFailed = false
+            return true
+        } catch {
+            autosaveFailed = true
+            self.error = "Could not save edits before closing: \(error.localizedDescription)"
+            return false
+        }
+    }
+
     func refresh() {
         guard let recipe = draft else { return }
         let url = URL(fileURLWithPath: recipe.sourcePath)
@@ -226,12 +252,18 @@ final class EditorModel: ObservableObject {
         let revision = renderingRevision
         if recipe.kind == .photo {
             player = nil
-            sourceSize = (try? MediaIO.photoImage(url: url).extent.size) ?? .zero
+            if previewSourcePath != url.path {
+                sourceSize = (try? MediaIO.photoImage(url: url).extent.size) ?? .zero
+                previewSourcePath = url.path
+            }
             previewTask?.cancel()
             let overlayID = overlayVisible && maskPanelActive && !cropEditing && !showingOriginal ? selectedMaskID : nil
+            let interactive = gestureStart != nil
             previewTask = Task.detached(priority: .userInitiated) {
                 do {
-                    let cg = try MediaIO.photoPreviewCGImage(url: url, recipe: renderRecipe, selectedMaskID: overlayID)
+                    if interactive { try await Task.sleep(for: .milliseconds(35)) }
+                    try Task.checkCancellation()
+                    let cg = try MediaIO.photoPreviewCGImage(url: url, recipe: renderRecipe, selectedMaskID: overlayID, maxPixelSize: interactive ? 900 : 1800)
                     await MainActor.run {
                         guard revision == self.renderingRevision else { return }
                         self.image = NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
@@ -245,10 +277,18 @@ final class EditorModel: ObservableObject {
             let overlayID = overlayVisible && maskPanelActive && !cropEditing && !showingOriginal ? selectedMaskID : nil
             let wasPlaying = player?.rate ?? 0 > 0
             let position = player?.currentTime() ?? .zero
+            let existingItem = previewSourcePath == url.path ? player?.currentItem : nil
             Task {
                 do {
-                    let item = try await MediaIO.videoItem(url: url, recipe: renderRecipe, selectedMaskID: overlayID)
                     let asset = AVURLAsset(url: url)
+                    if let existingItem {
+                        let composition = try await MediaIO.videoComposition(asset: asset, recipe: renderRecipe, selectedMaskID: overlayID)
+                        guard revision == renderingRevision else { return }
+                        existingItem.videoComposition = composition
+                        if let end = recipe.videoTrim.endSeconds { existingItem.forwardPlaybackEndTime = CMTime(seconds: end, preferredTimescale: 600) }
+                        return
+                    }
+                    let item = try await MediaIO.videoItem(url: url, recipe: renderRecipe, selectedMaskID: overlayID)
                     let assetDuration = try await asset.load(.duration)
                     let tracks = try await asset.loadTracks(withMediaType: .video)
                     let track = tracks.first
@@ -258,6 +298,7 @@ final class EditorModel: ObservableObject {
                     guard revision == renderingRevision else { return }
                     let next = AVPlayer(playerItem: item)
                     player = next
+                    previewSourcePath = url.path
                     duration = assetDuration.seconds.isFinite ? assetDuration.seconds : 0
                     sourceSize = displayedSize
                     let start = recipe.videoTrim.startSeconds

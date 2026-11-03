@@ -4,7 +4,6 @@ import EditorCore
 struct MaskInspector: View {
     @ObservedObject var model: EditorModel
     @State private var selectedBand = 0
-    private let bands = ["Red", "Orange", "Yellow", "Green", "Aqua", "Blue", "Purple", "Magenta"]
 
     var body: some View {
         ScrollView {
@@ -48,6 +47,7 @@ struct MaskInspector: View {
                     Toggle("Invert selection", isOn: Binding(get: { model.selectedMask?.inverted ?? false }, set: { value in
                         model.updateMask { $0.inverted = value }
                     }))
+                    Button("Create Inverted Mask") { model.duplicateSelectedMaskAsInverse() }
                     Toggle("Show mask overlay", isOn: Binding(get: { model.overlayVisible }, set: { value in
                         model.overlayVisible = value
                         model.refresh()
@@ -57,18 +57,16 @@ struct MaskInspector: View {
                     if mask.kind == .linear { linearControls }
                     Button("Delete Mask", role: .destructive) { model.deleteSelectedMask() }
                     Divider()
-                    Text("Local Light").font(.headline)
+                    localHeader("Local Light", parameters: [.exposure, .contrast, .highlights, .shadows, .whites, .blacks])
                     ForEach([Parameter.exposure, .contrast, .highlights, .shadows, .whites, .blacks], id: \.self) { localSlider($0) }
                     Divider()
-                    Text("Local Color").font(.headline)
+                    localHeader("Local Color", parameters: [.temperature, .tint, .saturation, .vibrance])
                     ForEach([Parameter.temperature, .tint, .saturation, .vibrance], id: \.self) { localSlider($0) }
                     Divider()
-                    Text("Local Color Mixer").font(.headline)
-                    Picker("Band", selection: $selectedBand) {
-                        ForEach(0..<bands.count, id: \.self) { index in Text(bands[index]).tag(index) }
-                    }
+                    localHeader("Local Color Mixer", parameters: Array(Parameter.allCases.dropFirst(10)))
+                    MixerBandPicker(selection: $selectedBand)
                     let parameters = Array(Parameter.allCases.dropFirst(10))
-                    ForEach(parameters[(selectedBand * 3)..<(selectedBand * 3 + 3)], id: \.self) { localSlider($0) }
+                    ForEach(parameters[(selectedBand * 3)..<(selectedBand * 3 + 3)], id: \.self) { localSlider($0, mixer: true) }
                 } else {
                     Text("Add a mask to adjust part of the image.").font(.caption).foregroundStyle(.secondary)
                 }
@@ -98,6 +96,11 @@ struct MaskInspector: View {
             geometrySlider("Center Y", \.center.y)
             geometrySlider("Width", \.radiusX)
             geometrySlider("Height", \.radiusY)
+            Text("Rotation \(Int(model.selectedMask?.rotationDegrees ?? 0))°").font(.caption)
+            Slider(value: Binding(get: { model.selectedMask?.rotationDegrees ?? 0 }, set: { value in
+                model.updateMask { $0.rotationDegrees = value }
+            }), in: -180...180, onEditingChanged: { editing in editing ? model.beginGesture() : model.endGesture() })
+                .accessibilityLabel("Radial rotation")
             geometrySlider("Feather", \.feather)
         }
     }
@@ -123,10 +126,10 @@ struct MaskInspector: View {
         }
     }
 
-    private func localSlider(_ parameter: Parameter) -> some View {
+    private func localSlider(_ parameter: Parameter, mixer: Bool = false) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             HStack {
-                Text(parameter.title)
+                Text(mixer ? String(parameter.title.split(separator: " ").last ?? "") : parameter.title)
                 Spacer()
                 Text(parameter == .exposure ? String(format: "%.2f", model.selectedMask?.adjustment[parameter] ?? 0) : String(format: "%.0f", model.selectedMask?.adjustment[parameter] ?? 0))
                     .monospacedDigit()
@@ -135,6 +138,19 @@ struct MaskInspector: View {
                 model.updateMask { $0.adjustment[parameter] = value }
             }), in: parameter.limits, onEditingChanged: { editing in editing ? model.beginGesture() : model.endGesture() })
                 .accessibilityLabel("Local \(parameter.title)")
+            if mixer && parameter.rawValue.hasSuffix("Hue") { MixerHueGuide(band: selectedBand) }
+        }
+    }
+
+    private func localHeader(_ title: String, parameters: [Parameter]) -> some View {
+        HStack {
+            Text(title).font(.headline)
+            Spacer()
+            Button {
+                model.updateMask { mask in for parameter in parameters { mask.adjustment[parameter] = 0 } }
+            } label: { Image(systemName: "arrow.counterclockwise").font(.caption) }
+                .buttonStyle(.borderless).help("Reset \(title) adjustments")
+                .accessibilityLabel("Reset \(title) adjustments")
         }
     }
 }

@@ -20,14 +20,29 @@ enum MediaIO {
         return image
     }
 
+    static func thumbnailCGImage(url: URL, kind: MediaKind) async -> CGImage? {
+        if kind == .video {
+            let generator = AVAssetImageGenerator(asset: AVURLAsset(url: url))
+            generator.appliesPreferredTrackTransform = true
+            generator.maximumSize = CGSize(width: 160, height: 120)
+            return try? await generator.image(at: CMTime(seconds: 0.5, preferredTimescale: 600)).image
+        }
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+        return CGImageSourceCreateThumbnailAtIndex(source, 0, [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: 160
+        ] as CFDictionary)
+    }
+
     static func photoPreview(url: URL, recipe: EditRecipe, selectedMaskID: UUID? = nil) throws -> NSImage {
         let cg = try photoPreviewCGImage(url: url, recipe: recipe, selectedMaskID: selectedMaskID)
         return NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
     }
 
-    static func photoPreviewCGImage(url: URL, recipe: EditRecipe, selectedMaskID: UUID? = nil) throws -> CGImage {
+    static func photoPreviewCGImage(url: URL, recipe: EditRecipe, selectedMaskID: UUID? = nil, maxPixelSize: Int = 1800) throws -> CGImage {
         let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate)?.timeIntervalSince1970 ?? 0
-        let key = "\(url.path):\(modified)" as NSString
+        let key = "\(url.path):\(modified):\(maxPixelSize)" as NSString
         let sourceImage: CIImage
         if let cached = thumbnailCache.object(forKey: key) {
             sourceImage = cached
@@ -36,7 +51,7 @@ enum MediaIO {
                   let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, [
                     kCGImageSourceCreateThumbnailFromImageAlways: true,
                     kCGImageSourceCreateThumbnailWithTransform: true,
-                    kCGImageSourceThumbnailMaxPixelSize: 1800
+                    kCGImageSourceThumbnailMaxPixelSize: maxPixelSize
                   ] as CFDictionary) else {
                 throw NSError(domain: "Editor", code: 1, userInfo: [NSLocalizedDescriptionKey: "Image preview could not be decoded."])
             }
@@ -46,8 +61,8 @@ enum MediaIO {
         let graded = CoreRenderer.render(sourceImage, color: recipe.color, masks: recipe.masks)
         let cropped = CoreRenderer.applyGeometry(overlay(graded, recipe: recipe, selectedMaskID: selectedMaskID), geometry: recipe.geometry)
         var previewFrame = recipe.outputFrame
-        if var frame = previewFrame, max(frame.width, frame.height) > 1800 {
-            let scale = 1800.0 / Double(max(frame.width, frame.height))
+        if var frame = previewFrame, max(frame.width, frame.height) > maxPixelSize {
+            let scale = Double(maxPixelSize) / Double(max(frame.width, frame.height))
             frame.width = max(1, Int((Double(frame.width) * scale).rounded()))
             frame.height = max(1, Int((Double(frame.height) * scale).rounded()))
             previewFrame = frame

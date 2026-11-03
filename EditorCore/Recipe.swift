@@ -73,6 +73,11 @@ public struct ColorState: Codable, Equatable, Sendable {
         effective = base
     }
 
+    public mutating func resetManual(_ parameters: [Parameter]) {
+        for parameter in parameters { manualDelta[parameter] = 0 }
+        effective = base.adding(manualDelta, clamp: true)
+    }
+
     public mutating func resetEasy() {
         easy = EasySettings()
         base = AdjustmentVector()

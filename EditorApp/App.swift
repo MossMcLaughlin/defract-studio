@@ -24,10 +24,11 @@ struct EditorView: View {
     @AppStorage("shownManualHelp") private var shownManualHelp = false
     @State private var selectedBand = 0
     @State private var zoom = 1.0
+    @State private var pan = CGSize.zero
+    @State private var panAtDragStart: CGSize?
     @State private var confirmReset = false
     @State private var painting = false
     @State private var hoverLocation: CGPoint?
-    private let bands = ["Red", "Orange", "Yellow", "Green", "Aqua", "Blue", "Purple", "Magenta"]
 
     var body: some View {
         VStack(spacing: 0) {
@@ -54,13 +55,12 @@ struct EditorView: View {
 
     private var toolbar: some View {
         HStack(spacing: 14) {
-            Button("Import", action: model.importFiles).keyboardShortcut("o", modifiers: .command)
-            Button(sidebarVisible ? "Hide Files" : "Show Files") { sidebarVisible.toggle() }
+            if !sidebarVisible { Button("Show Files") { sidebarVisible = true }.accessibilityLabel("Show Files") }
             Button("Undo", action: model.undo).disabled(!model.canUndo).keyboardShortcut("z", modifiers: .command)
             Button("Redo", action: model.redo).disabled(!model.canRedo).keyboardShortcut("z", modifiers: [.command, .shift])
             Button(model.showingOriginal ? "Show Edited" : "Before/After") { model.showingOriginal.toggle(); model.refresh() }
                 .disabled(model.draft == nil)
-            Button(model.cropEditing ? "Done Cropping" : "Crop & Rotate") { zoom = 1; model.toggleCropEditing() }
+            Button(model.cropEditing ? "Done Cropping" : "Crop & Rotate") { resetZoom(); model.toggleCropEditing() }
                 .disabled(model.draft == nil)
             Spacer()
             Text("Photo & Video Editor").font(.headline).foregroundStyle(.secondary)
@@ -78,7 +78,14 @@ struct EditorView: View {
     }
 
     private var sidebar: some View {
-        ScrollView {
+        VStack(spacing: 6) {
+            HStack {
+                Button("Import", action: model.importFiles).keyboardShortcut("o", modifiers: .command)
+                Spacer()
+                Button { sidebarVisible = false } label: { Image(systemName: "sidebar.left") }
+                    .help("Hide Files").accessibilityLabel("Hide Files")
+            }.buttonStyle(.borderless).padding(.horizontal, 8).padding(.top, 8)
+            ScrollView {
             LazyVStack(alignment: .leading, spacing: 4) {
                 ForEach(model.items, id: \.current.id) { history in
                     let recipe = history.current
@@ -86,7 +93,7 @@ struct EditorView: View {
                         model.select(recipe.id)
                     } label: {
                         VStack(alignment: .leading, spacing: 2) {
-                            Image(systemName: recipe.kind == .video ? "film" : "photo")
+                            MediaThumbnail(path: recipe.sourcePath, kind: recipe.kind)
                             Text(URL(fileURLWithPath: recipe.sourcePath).lastPathComponent)
                                 .lineLimit(2).font(.caption)
                         }
@@ -98,8 +105,9 @@ struct EditorView: View {
                     .accessibilityLabel("Select \(URL(fileURLWithPath: recipe.sourcePath).lastPathComponent)")
                 }
             }.padding(6)
+            }
         }
-        .frame(width: 120)
+        .frame(width: 128)
         .background(Color(red: 0.13, green: 0.15, blue: 0.15))
     }
 
@@ -124,6 +132,7 @@ struct EditorView: View {
                         Image(nsImage: image).resizable().scaledToFit()
                             .frame(width: geometry.size.width, height: geometry.size.height)
                             .scaleEffect(zoom)
+                            .offset(pan)
                             .clipped()
                         if model.cropEditing { CropOverlay(model: model) }
                         else if inspectorTab == "Masks", model.selectedMask?.kind == .linear || model.selectedMask?.kind == .radial {
@@ -153,6 +162,22 @@ struct EditorView: View {
                             }
                         }
                     }
+                    .contentShape(Rectangle())
+                    .background(WheelZoomView { delta, location in
+                        changeZoom(by: delta, at: location, viewSize: geometry.size)
+                    })
+                    .simultaneousGesture(DragGesture(minimumDistance: 2).onChanged { value in
+                        guard zoom > 1, inspectorTab != "Masks", !model.cropEditing else { return }
+                        if panAtDragStart == nil { panAtDragStart = pan }
+                        let start = panAtDragStart ?? .zero
+                        pan = constrainedPan(CGSize(width: start.width + value.translation.width, height: start.height + value.translation.height), viewSize: geometry.size, imageSize: image.size)
+                    }.onEnded { _ in panAtDragStart = nil })
+                    .onChange(of: geometry.size) { _, size in
+                        pan = constrainedPan(pan, viewSize: size, imageSize: image.size)
+                    }
+                    .onChange(of: zoom) { _, _ in
+                        pan = constrainedPan(pan, viewSize: geometry.size, imageSize: image.size)
+                    }
                 }
             } else if model.draft == nil {
                 Button("Open Photos or Videos", action: model.importFiles)
@@ -162,9 +187,9 @@ struct EditorView: View {
             if model.kind == .video { videoControls }
             else if model.kind == .photo {
                 HStack {
-                    Button("Fit") { zoom = 1 }
-                    Slider(value: $zoom, in: 1...3).frame(width: 120)
-                    Text("\(Int(zoom * 100))%")
+                    Button("Fit") { resetZoom() }
+                    Slider(value: $zoom, in: 1...4).frame(width: 120)
+                    Text(zoom == 1 ? "Fit" : String(format: "%.1f× Fit", zoom))
                 }.font(.caption)
             }
         }
@@ -216,11 +241,7 @@ struct EditorView: View {
                         else { advancedInspector }
                         if model.kind != nil { cropInspector }
                         Divider()
-                        HStack {
-                            Button("Reset Easy") { model.change { $0.color.resetEasy() } }
-                            Button("Reset Manual") { model.change { $0.color.resetManual() } }
-                        }
-                        Button("Reset All") { confirmReset = true }
+                        Menu("More") { Button("Reset All Global Color…") { confirmReset = true } }
                     }.padding(.vertical, 6)
                 }
             }
@@ -235,8 +256,8 @@ struct EditorView: View {
         let scale = min(viewSize.width / imageSize.width, viewSize.height / imageSize.height) * zoom
         let width = imageSize.width * scale
         let height = imageSize.height * scale
-        let u = (location.x - (viewSize.width - width) / 2) / width
-        let v = (location.y - (viewSize.height - height) / 2) / height
+        let u = (location.x - pan.width - (viewSize.width - width) / 2) / width
+        let v = (location.y - pan.height - (viewSize.height - height) / 2) / height
         guard (0...1).contains(u), (0...1).contains(v) else { return nil }
         let geometrySize = recipe.geometry.outputSize(for: model.sourceSize)
         let outputPoint = recipe.outputFrame?.inputPoint(fromOutputNormalized: NormalizedPoint(u, v), inputSize: geometrySize)
@@ -245,6 +266,25 @@ struct EditorView: View {
         let point = recipe.geometry.sourcePoint(fromOutputNormalized: outputPoint, sourceSize: model.sourceSize)
         guard (0...1).contains(point.x), (0...1).contains(point.y) else { return nil }
         return point
+    }
+
+    private func resetZoom() { zoom = 1; pan = .zero; panAtDragStart = nil }
+
+    private func constrainedPan(_ proposed: CGSize, viewSize: CGSize, imageSize: NSSize) -> CGSize {
+        let fit = min(viewSize.width / max(1, imageSize.width), viewSize.height / max(1, imageSize.height))
+        let limitX = max(0, (imageSize.width * fit * zoom - viewSize.width) / 2)
+        let limitY = max(0, (imageSize.height * fit * zoom - viewSize.height) / 2)
+        return CGSize(width: min(limitX, max(-limitX, proposed.width)), height: min(limitY, max(-limitY, proposed.height)))
+    }
+
+    private func changeZoom(by delta: CGFloat, at location: CGPoint, viewSize: CGSize) {
+        guard model.kind == .photo, let image = model.image else { return }
+        let old = zoom
+        zoom = min(4, max(1, zoom * exp(Double(delta) * 0.015)))
+        let factor = zoom / old
+        let proposed = CGSize(width: (pan.width - (location.x - viewSize.width / 2)) * factor + (location.x - viewSize.width / 2),
+                              height: (pan.height - (location.y - viewSize.height / 2)) * factor + (location.y - viewSize.height / 2))
+        pan = zoom == 1 ? .zero : constrainedPan(proposed, viewSize: viewSize, imageSize: image.size)
     }
 
     private func brushDiameter(viewSize: CGSize, imageSize: NSSize) -> CGFloat {
@@ -266,8 +306,8 @@ struct EditorView: View {
 
     private var easyInspector: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("Underwater Easy").font(.headline)
-            easySlider("Water Color", \.waterColor, range: -100...100, hint: "Deepen Blue   ·   Remove Green")
+            sectionHeader("Underwater Easy", help: "Reset Easy sliders") { model.change { $0.color.resetEasy() } }
+            easySlider("Water Color", \.waterColor, range: -100...100, hint: "Deepen Blue|Remove Green")
             easySlider("Color Recovery", \.colorRecovery, range: 0...100)
             easySlider("Light", \.light, range: -100...100)
             easySlider("Visibility", \.visibility, range: 0...100)
@@ -282,7 +322,7 @@ struct EditorView: View {
     private var cropInspector: some View {
         VStack(alignment: .leading, spacing: 8) {
             Divider()
-            Text("Crop & Rotate").font(.headline)
+            sectionHeader("Crop & Rotate", help: "Reset crop and rotation") { model.change { $0.geometry = Geometry() } }
             Picker("Aspect", selection: Binding(get: { model.draft?.geometry.aspect ?? .original }, set: { value in
                 model.change { $0.geometry.aspect = value }
             })) {
@@ -331,33 +371,35 @@ struct EditorView: View {
                 model.change { $0.color.setEasy { $0[keyPath: key] = value.rounded() } }
             }), in: range, onEditingChanged: { editing in editing ? model.beginGesture() : model.endGesture() })
                 .accessibilityLabel(title)
-            if let hint { Text(hint).font(.caption2).foregroundStyle(.secondary) }
+            if let hint {
+                let labels = hint.split(separator: "|")
+                HStack { Text(String(labels[0])); Spacer(); Text(String(labels.count > 1 ? labels[1] : "")) }
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
         }
     }
 
     private var advancedInspector: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("Light").font(.headline)
+            sectionHeader("Light", help: "Reset manual Light adjustments") { model.change { $0.color.resetManual([.exposure, .contrast, .highlights, .shadows, .whites, .blacks]) } }
             ForEach([Parameter.exposure, .contrast, .highlights, .shadows, .whites, .blacks], id: \.self) { parameter in advancedSlider(parameter) }
             Divider()
-            Text("Color").font(.headline)
+            sectionHeader("Color", help: "Reset manual Color adjustments") { model.change { $0.color.resetManual([.temperature, .tint, .saturation, .vibrance]) } }
             ForEach([Parameter.temperature, .tint, .saturation, .vibrance], id: \.self) { parameter in advancedSlider(parameter) }
             Divider()
-            Text("Color Mixer").font(.headline)
-            Picker("Band", selection: $selectedBand) {
-                ForEach(0..<bands.count, id: \.self) { index in Text(bands[index]).tag(index) }
-            }
+            sectionHeader("Color Mixer", help: "Reset all manual Color Mixer adjustments") { model.change { $0.color.resetManual(Array(Parameter.allCases.dropFirst(10))) } }
+            MixerBandPicker(selection: $selectedBand)
             Text("Positive Green Hue moves toward Aqua; positive Aqua Hue moves toward Blue.")
                 .font(.caption2).foregroundStyle(.secondary)
             let parameters = Array(Parameter.allCases.dropFirst(10))
-            ForEach(parameters[(selectedBand * 3)..<(selectedBand * 3 + 3)], id: \.self) { parameter in advancedSlider(parameter) }
+            ForEach(parameters[(selectedBand * 3)..<(selectedBand * 3 + 3)], id: \.self) { parameter in advancedSlider(parameter, mixer: true) }
         }
     }
 
-    private func advancedSlider(_ parameter: Parameter) -> some View {
+    private func advancedSlider(_ parameter: Parameter, mixer: Bool = false) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             HStack {
-                Text(parameter.title)
+                Text(mixer ? String(parameter.title.split(separator: " ").last ?? "") : parameter.title)
                     .onTapGesture(count: 2) { model.change { $0.color.setEffective(parameter, to: $0.color.base[parameter]) } }
                 Spacer()
                 Text(parameter == .exposure ? String(format: "%.2f", model.draft?.color.effective[parameter] ?? 0) : String(format: "%.0f", model.draft?.color.effective[parameter] ?? 0))
@@ -367,7 +409,48 @@ struct EditorView: View {
                 model.change { $0.color.setEffective(parameter, to: value) }
             }), in: parameter.limits, onEditingChanged: { editing in editing ? model.beginGesture() : model.endGesture() })
                 .accessibilityLabel(parameter.title)
+            if mixer && parameter.rawValue.hasSuffix("Hue") { MixerHueGuide(band: selectedBand) }
         }
+    }
+
+    private func sectionHeader(_ title: String, help: String, action: @escaping () -> Void) -> some View {
+        HStack {
+            Text(title).font(.headline)
+            Spacer()
+            Button(action: action) { Image(systemName: "arrow.counterclockwise").font(.caption) }
+                .buttonStyle(.borderless).help(help).accessibilityLabel(help)
+        }
+    }
+}
+
+struct MixerBandPicker: View {
+    @Binding var selection: Int
+    private let names = ["Red", "Orange", "Yellow", "Green", "Aqua", "Blue", "Purple", "Magenta"]
+    private let colors: [Color] = [.red, .orange, .yellow, .green, .cyan, .blue, .purple, .pink]
+
+    var body: some View {
+        HStack(spacing: 3) {
+            ForEach(0..<8, id: \.self) { index in
+                Button { selection = index } label: {
+                    Circle().fill(colors[index]).frame(width: 22, height: 22)
+                        .padding(3)
+                        .overlay(Circle().stroke(selection == index ? Color.white : .clear, lineWidth: 2))
+                        .frame(maxWidth: .infinity, minHeight: 32)
+                }
+                .buttonStyle(.plain).help(names[index]).accessibilityLabel(names[index])
+                    .accessibilityAddTraits(selection == index ? .isSelected : [])
+            }
+        }
+    }
+}
+
+struct MixerHueGuide: View {
+    let band: Int
+    private let colors: [Color] = [.red, .orange, .yellow, .green, .cyan, .blue, .purple, .pink]
+    var body: some View {
+        LinearGradient(colors: [colors[(band + 7) % 8], colors[band], colors[(band + 1) % 8]], startPoint: .leading, endPoint: .trailing)
+            .frame(height: 4).clipShape(Capsule()).padding(.horizontal, 8)
+            .accessibilityHidden(true)
     }
 }
 
@@ -375,4 +458,44 @@ struct PlayerView: NSViewRepresentable {
     let player: AVPlayer
     func makeNSView(context: Context) -> AVPlayerView { AVPlayerView() }
     func updateNSView(_ view: AVPlayerView, context: Context) { view.player = player; view.controlsStyle = .none }
+}
+
+struct WheelZoomView: NSViewRepresentable {
+    let onScroll: (CGFloat, CGPoint) -> Void
+
+    func makeNSView(context: Context) -> WheelView { WheelView() }
+    func updateNSView(_ view: WheelView, context: Context) { view.onScroll = onScroll }
+
+    final class WheelView: NSView {
+        var onScroll: ((CGFloat, CGPoint) -> Void)?
+        override func scrollWheel(with event: NSEvent) {
+            let point = convert(event.locationInWindow, from: nil)
+            onScroll?(event.scrollingDeltaY, CGPoint(x: point.x, y: bounds.height - point.y))
+        }
+    }
+}
+
+struct MediaThumbnail: View {
+    let path: String
+    let kind: MediaKind
+    @State private var image: NSImage?
+    @MainActor private static let cache = NSCache<NSString, NSImage>()
+
+    var body: some View {
+        Group {
+            if let image { Image(nsImage: image).resizable().scaledToFill() }
+            else { Image(systemName: kind == .video ? "film" : "photo").resizable().scaledToFit().padding(12) }
+        }
+        .frame(width: 108, height: 68).clipped().background(.black.opacity(0.25))
+        .task(id: path) {
+            if let cached = Self.cache.object(forKey: path as NSString) { image = cached; return }
+            let url = URL(fileURLWithPath: path)
+            let cg = await Task.detached(priority: .utility) { await MediaIO.thumbnailCGImage(url: url, kind: kind) }.value
+            if let cg {
+                let loaded = NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
+                Self.cache.setObject(loaded, forKey: path as NSString)
+                image = loaded
+            }
+        }
+    }
 }

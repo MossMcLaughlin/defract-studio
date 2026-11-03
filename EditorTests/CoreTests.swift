@@ -211,6 +211,58 @@ final class CoreTests: XCTestCase {
         }
     }
 
+    func testIndependentInverseMaskAndRadialRotationRoundTrip() throws {
+        var original = EditMask(name: "Foreground", kind: .brush)
+        original.strokes = [BrushStroke(operation: .add, points: [NormalizedPoint(0.5, 0.5)], size: 0.4, feather: 0.2)]
+        original.adjustment[.exposure] = 1
+        let copy = original.invertedCopy()
+        XCTAssertNotEqual(copy.id, original.id)
+        XCTAssertTrue(copy.adjustment.isNeutral)
+        XCTAssertEqual(MaskMath.alpha(at: NormalizedPoint(0.5, 0.5), mask: copy), 1 - MaskMath.alpha(at: NormalizedPoint(0.5, 0.5), mask: original), accuracy: 0.001)
+        original.strokes.removeAll()
+        XCTAssertEqual(copy.strokes.count, 1)
+        XCTAssertEqual(try JSONDecoder().decode(EditMask.self, from: JSONEncoder().encode(copy)), copy)
+
+        var radial = EditMask(name: "Oval", kind: .radial)
+        radial.radiusX = 0.4
+        radial.radiusY = 0.1
+        let point = NormalizedPoint(0.8, 0.5)
+        XCTAssertGreaterThan(MaskMath.alpha(at: point, mask: radial), 0.5)
+        radial.rotationDegrees = 90
+        XCTAssertLessThan(MaskMath.alpha(at: point, mask: radial), 0.1)
+        let extent = CGRect(x: 0, y: 0, width: 100, height: 100)
+        let renderedMask = MaskRenderer.alphaImage(for: radial, extent: extent)
+        let cg = try XCTUnwrap(CIContext().createCGImage(renderedMask, from: extent))
+        let bitmap = NSBitmapImageRep(cgImage: cg)
+        XCTAssertLessThan(try XCTUnwrap(bitmap.colorAt(x: 80, y: 50)).redComponent, 0.2)
+        XCTAssertGreaterThan(try XCTUnwrap(bitmap.colorAt(x: 50, y: 80)).redComponent, 0.5)
+        XCTAssertEqual(try JSONDecoder().decode(EditMask.self, from: JSONEncoder().encode(radial)), radial)
+        let oldJSON = try JSONSerialization.jsonObject(with: JSONEncoder().encode(radial)) as! [String: Any]
+        var withoutAngle = oldJSON
+        withoutAngle.removeValue(forKey: "rotationDegrees")
+        XCTAssertNil(try JSONDecoder().decode(EditMask.self, from: JSONSerialization.data(withJSONObject: withoutAngle)).rotationDegrees)
+    }
+
+    func testGlobalAndLocalMaskComposeInSavedOrder() throws {
+        let source = CIImage(color: CIColor(red: 0.2, green: 0.2, blue: 0.2)).cropped(to: CGRect(x: 0, y: 0, width: 64, height: 64))
+        var global = ColorState()
+        global.setEffective(.exposure, to: 0.5)
+        var mask = EditMask(name: "Center", kind: .radial)
+        mask.adjustment[.exposure] = 0.5
+        let context = CIContext()
+        func pixel(_ masks: [EditMask], _ x: Int, _ y: Int) throws -> CGFloat {
+            let rendered = CoreRenderer.render(source, color: global, masks: masks)
+            let image = try XCTUnwrap(context.createCGImage(rendered, from: source.extent))
+            return try XCTUnwrap(NSBitmapImageRep(cgImage: image).colorAt(x: x, y: y)).redComponent
+        }
+        let globalCenter = try pixel([], 32, 32)
+        let maskedCenter = try pixel([mask], 32, 32)
+        XCTAssertGreaterThan(maskedCenter, globalCenter + 0.03)
+        XCTAssertEqual(try pixel([mask], 0, 0), try pixel([], 0, 0), accuracy: 0.03)
+        mask.enabled = false
+        XCTAssertEqual(try pixel([mask], 32, 32), globalCenter, accuracy: 0.03)
+    }
+
     func testFitAndFillFrameWithoutStretching() throws {
         let source = CIImage(color: .red).cropped(to: CGRect(x: 0, y: 0, width: 100, height: 200))
         let context = CIContext()

@@ -33,6 +33,7 @@ public struct EditMask: Codable, Equatable, Sendable {
     public var center = NormalizedPoint(0.5, 0.5)
     public var radiusX = 0.3
     public var radiusY = 0.3
+    public var rotationDegrees: Double?
     public var start = NormalizedPoint(0.5, 0.2)
     public var end = NormalizedPoint(0.5, 0.8)
     public var feather = 0.3
@@ -41,6 +42,15 @@ public struct EditMask: Codable, Equatable, Sendable {
     public var adjustment = AdjustmentVector()
 
     public init(name: String, kind: MaskKind) { self.name = name; self.kind = kind }
+
+    public func invertedCopy() -> EditMask {
+        var copy = self
+        copy.id = UUID()
+        copy.name += " — Inverse"
+        copy.inverted.toggle()
+        copy.adjustment = AdjustmentVector()
+        return copy
+    }
 }
 
 public enum MaskMath {
@@ -57,8 +67,11 @@ public enum MaskMath {
             let projection = ((point.x - mask.start.x) * dx + (point.y - mask.start.y) * dy) / length
             value = smooth((projection - 0.5) / max(0.01, mask.feather) + 0.5)
         case .radial:
-            let dx = (point.x - mask.center.x) / max(0.0001, mask.radiusX)
-            let dy = (point.y - mask.center.y) / max(0.0001, mask.radiusY)
+            let angle = (mask.rotationDegrees ?? 0) * .pi / 180
+            let x = point.x - mask.center.x
+            let y = point.y - mask.center.y
+            let dx = (x * cos(angle) + y * sin(angle)) / max(0.0001, mask.radiusX)
+            let dy = (-x * sin(angle) + y * cos(angle)) / max(0.0001, mask.radiusY)
             let distance = sqrt(dx * dx + dy * dy)
             value = 1 - smooth((distance - (1 - mask.feather)) / max(0.01, mask.feather))
         case .brush, .subject:
@@ -111,6 +124,7 @@ public enum MaskRenderer {
             ])
             let transform = CGAffineTransform(translationX: -center.x, y: -center.y)
                 .concatenating(CGAffineTransform(scaleX: mask.radiusX * extent.width / radius, y: mask.radiusY * extent.height / radius))
+                .concatenating(CGAffineTransform(rotationAngle: (mask.rotationDegrees ?? 0) * .pi / 180))
                 .concatenating(CGAffineTransform(translationX: center.x, y: center.y))
             alpha = circle.transformed(by: transform).cropped(to: extent)
         case .subject:

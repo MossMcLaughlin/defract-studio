@@ -81,7 +81,11 @@ struct WindowCloseObserver: NSViewRepresentable {
                     self.model.closeAfterExport = true
                     self.model.exportSheetRequested = true
                 case .alertSecondButtonReturn:
-                    self.close()
+                    if self.model.saveForClose() {
+                        DispatchQueue.main.async { self.close() }
+                    } else {
+                        EditorApplicationDelegate.quitPending = false
+                    }
                 default: EditorApplicationDelegate.quitPending = false
                 }
             }
@@ -90,7 +94,7 @@ struct WindowCloseObserver: NSViewRepresentable {
 
         private func close() {
             allowClose = true
-            window?.performClose(nil)
+            window?.close()
             allowClose = false
         }
 
