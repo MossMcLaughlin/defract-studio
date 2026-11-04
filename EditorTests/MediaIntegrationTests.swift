@@ -135,6 +135,17 @@ final class MediaIntegrationTests: XCTestCase {
         measure("v6_neutral_output", recipe: recipe)
         recipe.detail.sharpening = 60
         measure("v6_sharpened_output", recipe: recipe)
+        recipe.detail.sharpening = 0
+        recipe.color.setEasy { $0.visibility = 50 }
+        measure("v6_visibility", recipe: recipe)
+        recipe.color.setEasy { $0.visibility = 0 }
+        recipe.color.setEffective(.clarity, to: 60)
+        recipe.color.setEffective(.dehaze, to: 50)
+        recipe.detail.autoProtection = false
+        recipe.detail.colorNoise = 60
+        recipe.detail.luminanceNoise = 25
+        recipe.detail.sharpening = 60
+        measure("v6_demanding", recipe: recipe)
         recipe.noiseAnalysis = nil
         recipe.detail = TechnicalDetail()
         recipe.schemaVersion = 5
@@ -739,5 +750,40 @@ final class MediaIntegrationTests: XCTestCase {
             frames.append(frame)
         }
         XCTAssertGreaterThan(meanRGBDifference(frames[0], frames[1]), 0.01)
+    }
+
+    @MainActor func testV6PlaybackPreviewCapKeepsFullExportAndLegacySize() async throws {
+        let source = fixtures.appendingPathComponent("test_media/videos/GX011247.MP4")
+        let asset = AVURLAsset(url: source)
+        var recipe = EditRecipe(sourcePath: source.path, kind: .video)
+        recipe.color.setEasy { $0.colorRecovery = 35 }
+        recipe.geometry.aspect = .fourFive
+        recipe.geometry.rotateQuarterTurns = 1
+        var mask = EditMask(name: "Water", kind: .linear)
+        mask.adjustment[.exposure] = 0.2
+        recipe.masks = [mask]
+        let preview = try await MediaIO.videoItem(url: source, recipe: recipe)
+        let full = try await MediaIO.videoComposition(asset: asset, recipe: recipe)
+        let previewSize = try XCTUnwrap(preview.videoComposition?.renderSize)
+        XCTAssertLessThanOrEqual(max(previewSize.width, previewSize.height), 1920)
+        XCTAssertGreaterThan(max(full.renderSize.width, full.renderSize.height), 3000)
+        XCTAssertEqual(previewSize.width / previewSize.height,
+                       full.renderSize.width / full.renderSize.height, accuracy: 0.002)
+
+        func frame(_ composition: AVVideoComposition) async throws -> CGImage {
+            let generator = AVAssetImageGenerator(asset: asset)
+            generator.videoComposition = composition
+            generator.appliesPreferredTrackTransform = true
+            generator.maximumSize = CGSize(width: 256, height: 256)
+            return try await generator.image(at: CMTime(seconds: 0.5, preferredTimescale: 600)).image
+        }
+        let previewFrame = try await frame(try XCTUnwrap(preview.videoComposition))
+        let fullFrame = try await frame(full)
+        XCTAssertLessThan(meanRGBDifference(previewFrame, fullFrame), 0.06)
+
+        recipe.schemaVersion = 5
+        recipe.rendererVersion = 5
+        let legacy = try await MediaIO.videoItem(url: source, recipe: recipe)
+        XCTAssertEqual(legacy.videoComposition?.renderSize, full.renderSize)
     }
 }

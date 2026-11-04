@@ -188,7 +188,8 @@ enum MediaIO {
         return tinted.applyingFilter("CIDissolveTransition", parameters: [kCIInputTargetImageKey: image, kCIInputTimeKey: 0.4])
     }
 
-    static func videoComposition(asset: AVURLAsset, recipe: EditRecipe, selectedMaskID: UUID? = nil) async throws -> AVVideoComposition {
+    static func videoComposition(asset: AVURLAsset, recipe: EditRecipe, selectedMaskID: UUID? = nil,
+                                 previewMaxPixelSize: Int? = nil) async throws -> AVVideoComposition {
         try validateInterpretation(recipe)
         let plan = RenderPlan(recipe: recipe)
         let v6 = plan.version >= 6
@@ -206,20 +207,45 @@ enum MediaIO {
         }
         let frameRate = nominalRate
         let renderContext = v6 ? v6VideoContext : context(for: recipe)
+        let previewLimit = v6 ? previewMaxPixelSize : nil
+        let previewFrame: OutputFrame? = recipe.outputFrame.map { frame in
+            guard let previewLimit, max(frame.width, frame.height) > previewLimit else { return frame }
+            let scale = Double(previewLimit) / Double(max(frame.width, frame.height))
+            var resized = frame
+            resized.width = max(2, 2 * Int((Double(frame.width) * scale / 2).rounded()))
+            resized.height = max(2, 2 * Int((Double(frame.height) * scale / 2).rounded()))
+            return resized
+        }
         return try await withCheckedThrowingContinuation { continuation in
             AVMutableVideoComposition.videoComposition(with: asset, applyingCIFiltersWithHandler: { request in
-                let graded = plan.grade(request.sourceImage)
+                let source: CIImage
+                if let previewLimit {
+                    let longEdge = max(request.sourceImage.extent.width, request.sourceImage.extent.height)
+                    let outputLimit = min(previewLimit, previewFrame.map { max($0.width, $0.height) } ?? previewLimit)
+                    let scale = min(1, CGFloat(outputLimit) / max(1, longEdge))
+                    source = scale < 1 ? request.sourceImage.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+                        : request.sourceImage
+                } else { source = request.sourceImage }
+                let graded = plan.grade(source)
                 let framed = plan.applyGeometry(overlay(graded, recipe: recipe, selectedMaskID: selectedMaskID))
-                let output = plan.applyOutputFrame(framed)
+                let output = plan.applyOutputFrame(framed, frame: previewFrame)
                 let frameIndex = Int64((request.compositionTime.seconds * frameRate).rounded())
                 request.finish(with: v6 ? CoreRenderer.ditherV6(output, bits: outputBits,
                                                                  video: true, frameIndex: frameIndex) : output,
                                context: renderContext)
             }, completionHandler: { composition, error in
                 if let composition {
-                    let output = recipe.outputFrame.map { CGSize(width: $0.width, height: $0.height) }
-                        ?? recipe.geometry.outputSize(for: composition.renderSize)
-                    composition.renderSize = CGSize(width: 2 * floor(output.width / 2), height: 2 * floor(output.height / 2))
+                    let sourceSize = composition.renderSize
+                    let inputScale: CGFloat = previewLimit.map {
+                        min(1, CGFloat($0) / max(sourceSize.width, sourceSize.height))
+                    } ?? 1
+                    let previewSourceSize = CGSize(width: sourceSize.width * inputScale,
+                                                   height: sourceSize.height * inputScale)
+                    let output = previewFrame.map { CGSize(width: $0.width, height: $0.height) }
+                        ?? recipe.geometry.outputSize(for: previewSourceSize)
+                    let width = 2 * floor(output.width / 2)
+                    let height = 2 * floor(output.height / 2)
+                    composition.renderSize = CGSize(width: width, height: height)
                     if v6 {
                         composition.colorPrimaries = AVVideoColorPrimaries_ITU_R_709_2
                         composition.colorTransferFunction = AVVideoTransferFunction_ITU_R_709_2
@@ -235,7 +261,8 @@ enum MediaIO {
     @MainActor static func videoItem(url: URL, recipe: EditRecipe, selectedMaskID: UUID? = nil) async throws -> AVPlayerItem {
         let asset = AVURLAsset(url: url)
         let item = AVPlayerItem(asset: asset)
-        item.videoComposition = try await videoComposition(asset: asset, recipe: recipe, selectedMaskID: selectedMaskID)
+        item.videoComposition = try await videoComposition(asset: asset, recipe: recipe,
+                                                            selectedMaskID: selectedMaskID, previewMaxPixelSize: 1920)
         if let end = recipe.videoTrim.endSeconds { item.forwardPlaybackEndTime = CMTime(seconds: end, preferredTimescale: 600) }
         return item
     }

@@ -377,7 +377,8 @@ final class EditorModel: ObservableObject {
                 do {
                     let asset = AVURLAsset(url: url)
                     if let existingItem {
-                        let composition = try await MediaIO.videoComposition(asset: asset, recipe: renderRecipe, selectedMaskID: overlayID)
+                        let composition = try await MediaIO.videoComposition(asset: asset, recipe: renderRecipe,
+                                                                             selectedMaskID: overlayID, previewMaxPixelSize: 1920)
                         guard revision == renderingRevision else { return }
                         existingItem.videoComposition = composition
                         if let end = recipe.videoTrim.endSeconds { existingItem.forwardPlaybackEndTime = CMTime(seconds: end, preferredTimescale: 600) }
