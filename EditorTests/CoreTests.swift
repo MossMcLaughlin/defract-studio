@@ -38,8 +38,80 @@ final class CoreTests: XCTestCase {
                        size: CGSize(width: width, height: height), format: .RGBAf, colorSpace: linearSpace)
     }
 
+    func testV6SharpeningVersioningPersistenceAndOutputScale() throws {
+        let source = noisyEdgeImage()
+        var recipe = EditRecipe(sourcePath: "/tmp/detail.png", kind: .photo)
+        XCTAssertTrue(RenderPlan(recipe: recipe).applyOutputFrame(source) === source)
+        recipe.detail.sharpening = 80
+        let sharpened = floatPixels(RenderPlan(recipe: recipe).applyOutputFrame(source))
+        let original = floatPixels(source)
+        let edge = (32 * 128 + 63) * 4
+        XCTAssertTrue(sharpened.allSatisfy(\.isFinite))
+        XCTAssertGreaterThan(abs(sharpened[edge] - original[edge]), 0.0001)
+        XCTAssertLessThan(abs(sharpened[edge] - original[edge]), 0.02)
+        let identity = NoiseAnalysisIdentity(recipe: recipe, fileSize: 1, modificationTime: 1)
+        recipe.noiseAnalysis = NoiseAnalysis(identity: identity, chromaSigma: 0.01, luminanceSigma: 0.012,
+                                            confidence: 1, validTiles: 12, frameCount: 1)
+        let protected = floatPixels(RenderPlan(recipe: recipe).applyOutputFrame(source))
+        let flat = (24 * 128 + 24) * 4
+        XCTAssertLessThan(abs(protected[flat] - original[flat]), 0.002)
+        recipe.outputFrame = OutputFrame(width: 64, height: 32, mode: .fit)
+        XCTAssertEqual(RenderPlan(recipe: recipe).applyOutputFrame(source).extent.size,
+                       CGSize(width: 64, height: 32))
+        var history = EditHistory(recipe)
+        history.apply { $0.detail.sharpening = 40 }
+        history.undo()
+        XCTAssertEqual(history.current.detail.sharpening, 80)
+        history.redo()
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let store = ProjectStore(directory: folder)
+        try store.save(history)
+        XCTAssertEqual(try store.load(id: recipe.id).current.detail.sharpening, 40)
+
+        recipe.schemaVersion = 5; recipe.rendererVersion = 5
+        recipe.outputFrame = nil
+        XCTAssertTrue(RenderPlan(recipe: recipe).applyOutputFrame(source) === source)
+        var oldObject = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(recipe)) as? [String: Any])
+        var oldDetail = try XCTUnwrap(oldObject["technicalDetail"] as? [String: Any])
+        oldDetail.removeValue(forKey: "sharpening")
+        oldObject["technicalDetail"] = oldDetail
+        let decoded = try JSONDecoder().decode(EditRecipe.self, from: JSONSerialization.data(withJSONObject: oldObject))
+        XCTAssertEqual(decoded.detail.sharpening, 0)
+        XCTAssertTrue(RenderPlan(recipe: decoded).applyOutputFrame(source) === source)
+    }
+
+    func testV6DitherIsDeterministicBoundedAndZeroMean() {
+        let source = CIImage(color: CIColor(red: 0.214, green: 0.214, blue: 0.214))
+            .cropped(to: CGRect(x: 0, y: 0, width: 256, height: 128))
+        let first = floatPixels(CoreRenderer.ditherV6(source, bits: 8, video: false))
+        let second = floatPixels(CoreRenderer.ditherV6(source, bits: 8, video: false))
+        let baseline = floatPixels(source)
+        XCTAssertEqual(first, second)
+        let videoA = floatPixels(CoreRenderer.ditherV6(source, bits: 10, video: true, frameIndex: 17))
+        let videoB = floatPixels(CoreRenderer.ditherV6(source, bits: 10, video: true, frameIndex: 18))
+        XCTAssertEqual(videoA, floatPixels(CoreRenderer.ditherV6(source, bits: 10, video: true, frameIndex: 17)))
+        XCTAssertNotEqual(videoA, videoB)
+        var sum = 0.0, maxChange = 0.0
+        for index in stride(from: 0, to: first.count, by: 4) {
+            let change = Double(first[index] - baseline[index])
+            sum += change
+            maxChange = max(maxChange, abs(change))
+        }
+        let mean = sum / Double(first.count / 4)
+        print("CP6_DITHER mean_linear=\(mean) max_linear=\(maxChange)")
+        XCTAssertLessThan(abs(mean), 0.00005)
+        XCTAssertLessThan(maxChange, 0.005)
+        XCTAssertGreaterThan(maxChange, 0.0001)
+        let maxVideoChange = stride(from: 0, to: videoA.count, by: 4)
+            .map { abs(Double(videoA[$0] - baseline[$0])) }.max() ?? 0
+        XCTAssertLessThan(maxVideoChange, maxChange)
+        XCTAssertTrue(first.allSatisfy(\.isFinite))
+    }
+
     func testV5VisibilityStatePersistenceAndLegacyMapping() throws {
         var recipe = EditRecipe(sourcePath: "/tmp/water.jpg", kind: .photo)
+        recipe.schemaVersion = 5; recipe.rendererVersion = 5
         recipe.color.setEasy { $0.visibility = 50 }
         XCTAssertEqual(recipe.color.base[.contrast], 4)
         XCTAssertEqual(recipe.color.base[.blacks], -3)
@@ -82,6 +154,7 @@ final class CoreTests: XCTestCase {
     func testV5NeutralBypassAndWaterEstimator() {
         let source = noisyEdgeImage()
         var recipe = EditRecipe(sourcePath: "/tmp/water.jpg", kind: .photo)
+        recipe.schemaVersion = 5; recipe.rendererVersion = 5
         XCTAssertTrue(RenderPlan(recipe: recipe).grade(source) === source)
         let water = WaterAnalysis(red: 0.12, green: 0.25, blue: 0.34,
                                   confidence: 1, samples: 200, frameCount: 1)
@@ -124,6 +197,7 @@ final class CoreTests: XCTestCase {
         let source = CIImage(bitmapData: pixels.withUnsafeBytes { Data($0) }, bytesPerRow: width * 16,
                              size: CGSize(width: width, height: height), format: .RGBAf, colorSpace: linearSpace)
         var recipe = EditRecipe(sourcePath: "/tmp/water.jpg", kind: .photo)
+        recipe.schemaVersion = 5; recipe.rendererVersion = 5
         let water = WaterAnalysis(red: 0.13, green: 0.28, blue: 0.38,
                                   confidence: 0.8, samples: 100, frameCount: 1)
         let identity = NoiseAnalysisIdentity(recipe: recipe, fileSize: 1, modificationTime: 1)
@@ -138,6 +212,7 @@ final class CoreTests: XCTestCase {
         XCTAssertTrue(clarity.allSatisfy(\.isFinite))
         print("CP5_CLARITY edge=\(clarity[edge] - original[edge]) interior=\(clarity[interior] - original[interior]) outside=\(clarity[outside] - original[outside])")
         XCTAssertGreaterThan(abs(clarity[edge] - original[edge]), 0.0001)
+        XCTAssertEqual(clarity[edge] - original[edge], 0.0145, accuracy: 0.001)
         XCTAssertLessThan(abs(clarity[interior] - original[interior]), 0.005)
         XCTAssertLessThan(abs(clarity[outside] - original[outside]), 0.01)
         recipe.color.setEffective(.clarity, to: -60)
@@ -485,8 +560,8 @@ final class CoreTests: XCTestCase {
     }
     func testRendererVersionDefaultsAndLegacyDecode() throws {
         let current = EditRecipe(sourcePath: "/tmp/source.jpg", kind: .photo)
-        XCTAssertEqual(current.schemaVersion, 5)
-        XCTAssertEqual(current.rendererVersion, 5)
+        XCTAssertEqual(current.schemaVersion, 6)
+        XCTAssertEqual(current.rendererVersion, 6)
         XCTAssertEqual(current.color.underwaterMappingVersion, 2)
         var historical = current
         historical.color = ColorState()

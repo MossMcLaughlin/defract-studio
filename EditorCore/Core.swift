@@ -2,8 +2,7 @@ import CoreImage
 
 public enum CoreRenderer {}
 
-/// Immutable per-recipe rendering choices. Input color conversion belongs to the CIContext;
-/// output mapping is reserved for a later renderer version.
+/// Immutable per-recipe rendering choices. Media adapters own input and output color conversion.
 public struct RenderPlan: Sendable {
     public enum WorkingSpace: Sendable { case legacySRGB, extendedLinearSRGB }
     public let version: Int
@@ -43,6 +42,12 @@ public struct RenderPlan: Sendable {
     }
 
     public func applyOutputFrame(_ image: CIImage) -> CIImage {
-        CoreRenderer.applyOutputFrame(image, frame: outputFrame)
+        applyOutputFrame(image, frame: outputFrame)
+    }
+
+    public func applyOutputFrame(_ image: CIImage, frame: OutputFrame?) -> CIImage {
+        let framed = CoreRenderer.applyOutputFrame(image, frame: frame)
+        return version >= 6 ? CoreRenderer.sharpenV6(framed, amount: detail.sharpening,
+                                                      noise: noiseAnalysis) : framed
     }
 }

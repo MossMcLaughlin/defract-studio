@@ -16,7 +16,7 @@ xcodebuild -project EditorApp.xcodeproj -scheme EditorApp -configuration Debug -
 ## Edit a file
 
 1. Click **Import** (⌘O) and choose JPEG, PNG, HEIC, MP4, or MOV files. Select a file in the left sidebar. Missing files can be relinked from the notice.
-2. Use **Global → Easy** for Water Color, Color Recovery, Light, and Visibility. **Advanced** offers exposure, tone, white balance, saturation, vibrance, eight color-band Hue/Saturation/Luminance controls, Clarity, Dehaze, and Detail noise protection. Manual Advanced refinements remain in place when Easy sliders move. Dehaze uses a conservative whole-scene water estimate; masks offer local Clarity but not local Dehaze.
+2. Use **Global → Easy** for Water Color, Color Recovery, Light, and Visibility. **Advanced** offers exposure, tone, white balance, saturation, vibrance, eight color-band Hue/Saturation/Luminance controls, Clarity, Dehaze, Detail noise protection, and output Sharpening for new edits. Manual Advanced refinements remain in place when Easy sliders move. Dehaze uses a conservative whole-scene water estimate; masks offer local Clarity but not local Dehaze.
 3. Use **Crop & Rotate** for aspect, position, quarter turns, and straighten. Photos can use **Masks → Select Subject** when Vision finds a foreground subject, or **Brush** for manual selection. Brush Add/Erase, feather, inversion, linear and radial masks, and separate local color adjustments are available. Videos support static linear and radial masks only.
 4. On videos, set the In and Out values below the preview. Use Play/Pause to review. **Before/After** shows the source color without changing the saved recipe. Undo is ⌘Z; Redo is ⇧⌘Z.
 5. Click **Export…** (⌘E). Choose Instagram, General, or Maximum Quality; choose a frame, Fit or Fill, dimensions, format/codec, name, and output folder. The preview updates to the chosen frame. **Fit** pads the image; **Fill** crops it. Export asks before replacing an existing file and writes a temporary file first. Cancel is available while exporting; **Show in Finder** appears on success.
@@ -25,7 +25,7 @@ Edits and undo history are stored in `~/Library/Application Support/PhotoVideoEd
 
 ## Scope and limits
 
-The editor processes SDR media into sRGB photos or Rec.709 MP4. The supplied `GX011247.MP4` is 10-bit HEVC Main 10 **SDR**, and its export is intentionally converted to an SDR delivery codec. HDR and RAW-specific workflows, multi-clip editing, video subject tracking, and batch export are outside this MVP. Automatic subject selection depends on Apple's Vision result; manual brush selection is always available for photos.
+The editor processes SDR media into 8-bit sRGB photos or Rec.709 MP4. The supplied `GX011247.MP4` is 10-bit HEVC Main 10 **SDR**; a new-edit Maximum Quality HEVC export from this source was verified as decoded 10-bit SDR on the development Mac. H.264 remains the compatibility choice. HDR and RAW-specific workflows, multi-clip editing, video subject tracking, and batch export are outside this MVP. Automatic subject selection depends on Apple's Vision result; manual brush selection is always available for photos.
 
 See `VERIFICATION_REPORT.md` for machine-tested results and open checks; `DEV_NOTES.md` for the actual architecture; `PRODUCT_MVP.md`, `UX_SPEC.md`, and `COLOR_ENGINE.md` for approved behavior; and `MEDIA_AND_TESTS.md` for local fixtures. `reference/STYLE_GUIDE_v0.1.md` and `reference/UI_REFERENCE.png` are the visual references.
 

@@ -11,6 +11,11 @@ enum MediaIO {
         .workingColorSpace: CGColorSpace(name: CGColorSpace.extendedLinearSRGB)!,
         .workingFormat: CIFormat.RGBAh
     ])
+    private static let v6VideoContext = CIContext(options: [
+        .workingColorSpace: CGColorSpace(name: CGColorSpace.extendedLinearSRGB)!,
+        .outputColorSpace: CGColorSpace(name: CGColorSpace.itur_709)!,
+        .workingFormat: CIFormat.RGBAh
+    ])
 
     static func context(for recipe: EditRecipe) -> CIContext {
         RenderPlan(recipe: recipe).workingSpace == .legacySRGB ? context : v2Context
@@ -125,7 +130,8 @@ enum MediaIO {
             frame.height = max(1, Int((Double(frame.height) * scale).rounded()))
             previewFrame = frame
         }
-        let rendered = CoreRenderer.applyOutputFrame(cropped, frame: previewFrame)
+        let framed = plan.applyOutputFrame(cropped, frame: previewFrame)
+        let rendered = plan.version >= 6 ? CoreRenderer.ditherV6(framed, bits: 8, video: false) : framed
         let cg = (recipe.rendererVersion ?? 1) == 1
             ? context.createCGImage(rendered, from: rendered.extent)
             : v2Context.createCGImage(rendered, from: rendered.extent, format: .RGBA8,
@@ -144,7 +150,8 @@ enum MediaIO {
         }
         let plan = RenderPlan(recipe: recipe)
         let cropped = plan.applyGeometry(plan.grade(try photoImage(url: url)))
-        let rendered = plan.applyOutputFrame(cropped)
+        let framed = plan.applyOutputFrame(cropped)
+        let rendered = plan.version >= 6 ? CoreRenderer.ditherV6(framed, bits: 8, video: false) : framed
         let temporary = destination.deletingLastPathComponent().appendingPathComponent(UUID().uuidString + "." + format.fileExtension)
         defer { try? FileManager.default.removeItem(at: temporary) }
         guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
@@ -158,8 +165,16 @@ enum MediaIO {
         guard CGImageDestinationFinalize(output) else {
             throw NSError(domain: "Editor", code: 4, userInfo: [NSLocalizedDescriptionKey: "Photo export failed."])
         }
-        guard CGImageSourceCreateWithURL(temporary as CFURL, nil) != nil else {
+        guard let reopened = CGImageSourceCreateWithURL(temporary as CFURL, nil) else {
             throw NSError(domain: "Editor", code: 10, userInfo: [NSLocalizedDescriptionKey: "Photo output could not be reopened."])
+        }
+        if plan.version >= 6 {
+            guard let decoded = CGImageSourceCreateImageAtIndex(reopened, 0, nil),
+                  decoded.colorSpace?.name == colorSpace.name,
+                  decoded.bitsPerComponent == 8 else {
+                throw NSError(domain: "Editor", code: 18, userInfo: [NSLocalizedDescriptionKey:
+                    "The photo export did not retain its verified 8-bit sRGB profile."])
+            }
         }
         if Task.isCancelled { throw CancellationError() }
         try commit(temporary, destination: destination, original: url, overwrite: overwrite)
@@ -176,17 +191,40 @@ enum MediaIO {
     static func videoComposition(asset: AVURLAsset, recipe: EditRecipe, selectedMaskID: UUID? = nil) async throws -> AVVideoComposition {
         try validateInterpretation(recipe)
         let plan = RenderPlan(recipe: recipe)
-        let renderContext = context(for: recipe)
+        let v6 = plan.version >= 6
+        var sourceColor = recipe.sourceColor
+        if v6 && sourceColor == nil { sourceColor = try await sourceColorDescriptor(url: asset.url, kind: .video) }
+        if sourceColor?.dynamicRange == .hlg || sourceColor?.dynamicRange == .pq {
+            throw NSError(domain: "Editor", code: 15, userInfo: [NSLocalizedDescriptionKey:
+                "HDR color conversion is not yet verified for this editor. The source was not graded or exported."])
+        }
+        let outputBits = recipe.videoCodec == .hevc && (sourceColor?.sourceBitDepth ?? 8) >= 10 ? 10 : 8
+        var nominalRate = 30.0
+        if v6, let track = try await asset.loadTracks(withMediaType: .video).first {
+            let rate = try await track.load(.nominalFrameRate)
+            if rate.isFinite && rate > 0 { nominalRate = Double(rate) }
+        }
+        let frameRate = nominalRate
+        let renderContext = v6 ? v6VideoContext : context(for: recipe)
         return try await withCheckedThrowingContinuation { continuation in
             AVMutableVideoComposition.videoComposition(with: asset, applyingCIFiltersWithHandler: { request in
                 let graded = plan.grade(request.sourceImage)
                 let framed = plan.applyGeometry(overlay(graded, recipe: recipe, selectedMaskID: selectedMaskID))
-                request.finish(with: plan.applyOutputFrame(framed), context: renderContext)
+                let output = plan.applyOutputFrame(framed)
+                let frameIndex = Int64((request.compositionTime.seconds * frameRate).rounded())
+                request.finish(with: v6 ? CoreRenderer.ditherV6(output, bits: outputBits,
+                                                                 video: true, frameIndex: frameIndex) : output,
+                               context: renderContext)
             }, completionHandler: { composition, error in
                 if let composition {
                     let output = recipe.outputFrame.map { CGSize(width: $0.width, height: $0.height) }
                         ?? recipe.geometry.outputSize(for: composition.renderSize)
                     composition.renderSize = CGSize(width: 2 * floor(output.width / 2), height: 2 * floor(output.height / 2))
+                    if v6 {
+                        composition.colorPrimaries = AVVideoColorPrimaries_ITU_R_709_2
+                        composition.colorTransferFunction = AVVideoTransferFunction_ITU_R_709_2
+                        composition.colorYCbCrMatrix = AVVideoYCbCrMatrix_ITU_R_709_2
+                    }
                     continuation.resume(returning: composition)
                 }
                 else { continuation.resume(throwing: error ?? NSError(domain: "Editor", code: 5)) }
@@ -240,6 +278,26 @@ enum MediaIO {
         let outputAudio = try await output.loadTracks(withMediaType: .audio)
         guard !outputVideo.isEmpty, sourceAudio.isEmpty || !outputAudio.isEmpty else {
             throw NSError(domain: "Editor", code: 11, userInfo: [NSLocalizedDescriptionKey: "Video output is missing picture or source audio."])
+        }
+        if (recipe.rendererVersion ?? 1) >= 6 {
+            let formats = try await outputVideo[0].load(.formatDescriptions)
+            guard let format = formats.first,
+                  let metadata = CMFormatDescriptionGetExtensions(format) as? [String: Any],
+                  metadata[kCMFormatDescriptionExtension_ColorPrimaries as String] as? String == AVVideoColorPrimaries_ITU_R_709_2,
+                  metadata[kCMFormatDescriptionExtension_TransferFunction as String] as? String == AVVideoTransferFunction_ITU_R_709_2,
+                  metadata[kCMFormatDescriptionExtension_YCbCrMatrix as String] as? String == AVVideoYCbCrMatrix_ITU_R_709_2 else {
+                throw NSError(domain: "Editor", code: 16, userInfo: [NSLocalizedDescriptionKey:
+                    "The exported video did not retain a verified Rec.709 SDR color description."])
+            }
+            var descriptor = recipe.sourceColor
+            if descriptor == nil { descriptor = try await sourceColorDescriptor(url: url, kind: .video) }
+            if recipe.videoCodec == .hevc && (descriptor?.sourceBitDepth ?? 8) >= 10 {
+                guard CMFormatDescriptionGetMediaSubType(format) == kCMVideoCodecType_HEVC,
+                      metadata[kCMFormatDescriptionExtension_BitsPerComponent as String] as? Int == 10 else {
+                    throw NSError(domain: "Editor", code: 17, userInfo: [NSLocalizedDescriptionKey:
+                        "This Mac did not produce 10-bit HEVC. Choose H.264 for an 8-bit export."])
+                }
+            }
         }
         try commit(temporary, destination: destination, original: url, overwrite: overwrite)
         progress?(1)

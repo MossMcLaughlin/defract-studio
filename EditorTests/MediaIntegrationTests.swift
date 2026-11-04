@@ -15,6 +15,32 @@ final class MediaIntegrationTests: XCTestCase {
         SHA256.hash(data: try Data(contentsOf: url))
     }
 
+    private func decodedTenBitLuma(_ asset: AVURLAsset, track: AVAssetTrack) throws -> [UInt16] {
+        let reader = try AVAssetReader(asset: asset)
+        let output = AVAssetReaderTrackOutput(track: track, outputSettings: [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr10BiPlanarFullRange
+        ])
+        reader.add(output)
+        guard reader.startReading(), let sample = output.copyNextSampleBuffer(),
+              let buffer = CMSampleBufferGetImageBuffer(sample) else {
+            throw NSError(domain: "EditorTests", code: 1, userInfo: [NSLocalizedDescriptionKey: "10-bit frame could not be decoded"])
+        }
+        XCTAssertEqual(CVPixelBufferGetPixelFormatType(buffer), kCVPixelFormatType_420YpCbCr10BiPlanarFullRange)
+        CVPixelBufferLockBaseAddress(buffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
+        let width = CVPixelBufferGetWidthOfPlane(buffer, 0)
+        let height = CVPixelBufferGetHeightOfPlane(buffer, 0)
+        let rowStride = CVPixelBufferGetBytesPerRowOfPlane(buffer, 0) / 2
+        let plane = CVPixelBufferGetBaseAddressOfPlane(buffer, 0)!.assumingMemoryBound(to: UInt16.self)
+        var codes: [UInt16] = []
+        for y in stride(from: height / 8, to: height * 7 / 8, by: max(1, height / 48)) {
+            for x in stride(from: width / 8, to: width * 7 / 8, by: max(1, width / 48)) {
+                codes.append(plane[y * rowStride + x] >> 6)
+            }
+        }
+        return codes
+    }
+
     private func meanRGBDifference(_ first: CGImage, _ second: CGImage) -> Double {
         let a = NSBitmapImageRep(cgImage: first)
         let b = NSBitmapImageRep(cgImage: second)
@@ -51,13 +77,15 @@ final class MediaIntegrationTests: XCTestCase {
             var times: [Double] = []
             for iteration in 0..<8 {
                 let start = CFAbsoluteTimeGetCurrent()
-                let graded = RenderPlan(recipe: recipe).grade(source)
-                let result = context.createCGImage(graded, from: graded.extent, format: .RGBA8, colorSpace: destination)
+                let plan = RenderPlan(recipe: recipe)
+                let output = plan.applyOutputFrame(plan.grade(source))
+                let rendered = plan.version >= 6 ? CoreRenderer.ditherV6(output, bits: 10, video: true) : output
+                let result = context.createCGImage(rendered, from: rendered.extent, format: .RGBA8, colorSpace: destination)
                 XCTAssertNotNil(result)
                 if iteration >= 2 { times.append((CFAbsoluteTimeGetCurrent() - start) * 1000) }
             }
             let sorted = times.sorted()
-            print("CP5_RENDER \(label) \(frame.width)x\(frame.height) iterations=\(sorted.count) median_ms=\(sorted[sorted.count / 2]) p95_ms=\(sorted.last!)")
+            print("CP6_RENDER \(label) \(frame.width)x\(frame.height) iterations=\(sorted.count) median_ms=\(sorted[sorted.count / 2]) p95_ms=\(sorted.last!)")
         }
         recipe.schemaVersion = 3
         recipe.rendererVersion = 3
@@ -97,6 +125,26 @@ final class MediaIntegrationTests: XCTestCase {
         recipe.detail.colorNoise = 60
         recipe.detail.luminanceNoise = 25
         measure("v5_combined_noise", recipe: recipe)
+        recipe.schemaVersion = 6
+        recipe.rendererVersion = 6
+        recipe.color.setEffective(.clarity, to: 0)
+        recipe.color.setEffective(.dehaze, to: 0)
+        recipe.detail.autoProtection = true
+        recipe.detail.colorNoise = 0
+        recipe.detail.luminanceNoise = 0
+        measure("v6_neutral_output", recipe: recipe)
+        recipe.detail.sharpening = 60
+        measure("v6_sharpened_output", recipe: recipe)
+        recipe.noiseAnalysis = nil
+        recipe.detail = TechnicalDetail()
+        recipe.schemaVersion = 5
+        recipe.rendererVersion = 5
+        measure("v5_no_analysis", recipe: recipe)
+        recipe.schemaVersion = 6
+        recipe.rendererVersion = 6
+        measure("v6_no_analysis_output", recipe: recipe)
+        recipe.detail.sharpening = 60
+        measure("v6_no_analysis_sharpened", recipe: recipe)
     }
 
     func testSourceColorDescriptorsUseMediaMetadata() async throws {
@@ -112,6 +160,58 @@ final class MediaIntegrationTests: XCTestCase {
         XCTAssertEqual(standard.dynamicRange, .sdr)
         XCTAssertNotNil(high.primaries)
         XCTAssertNotNil(still.profile)
+    }
+
+    func testV6PhotoSRGBConversionAndEncodedDither() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let p3 = CGColorSpace(name: CGColorSpace.displayP3)!
+        let srgb = CGColorSpace(name: CGColorSpace.sRGB)!
+        let p3Image = CIImage(bitmapData: [Float](repeating: 0.0, count: 32 * 32 * 4)
+            .enumerated().map { index, _ in [Float(0.83), 0.27, 0.12, 1][index % 4] }
+            .withUnsafeBytes { Data($0) }, bytesPerRow: 32 * 16,
+            size: CGSize(width: 32, height: 32), format: .RGBAf, colorSpace: p3)
+        let p3Source = folder.appendingPathComponent("p3.png")
+        try MediaIO.v2Context.writePNGRepresentation(of: p3Image, to: p3Source, format: .RGBA16,
+                                                     colorSpace: p3)
+        let expectedSource = try MediaIO.photoImage(url: p3Source)
+        let expected = try XCTUnwrap(MediaIO.v2Context.createCGImage(expectedSource, from: expectedSource.extent,
+                                                                     format: .RGBA8, colorSpace: srgb))
+        var recipe = EditRecipe(sourcePath: p3Source.path, kind: .photo)
+        let p3Output = folder.appendingPathComponent("p3-out.png")
+        try MediaIO.exportPhoto(url: p3Source, to: p3Output, recipe: recipe, format: .png)
+        let p3Export = try XCTUnwrap(CGImageSourceCreateWithURL(p3Output as CFURL, nil))
+        let actual = try XCTUnwrap(CGImageSourceCreateImageAtIndex(p3Export, 0, nil))
+        XCTAssertEqual(actual.colorSpace?.name, srgb.name)
+        XCTAssertLessThan(meanRGBDifference(expected, actual), 0.008)
+
+        let halfCode = (120.5 / 255 + 0.055) / 1.055
+        let linear = Float(pow(halfCode, 2.4))
+        let linearSpace = CGColorSpace(name: CGColorSpace.extendedLinearSRGB)!
+        let ramp = CIImage(bitmapData: [Float](repeating: 0.0, count: 256 * 128 * 4)
+            .enumerated().map { index, _ in index % 4 == 3 ? 1 : linear }
+            .withUnsafeBytes { Data($0) }, bytesPerRow: 256 * 16,
+            size: CGSize(width: 256, height: 128), format: .RGBAf, colorSpace: linearSpace)
+        let rampSource = folder.appendingPathComponent("ramp16.png")
+        try MediaIO.v2Context.writePNGRepresentation(of: ramp, to: rampSource, format: .RGBA16,
+                                                     colorSpace: srgb)
+        recipe.sourcePath = rampSource.path
+        let dithered = folder.appendingPathComponent("ramp-v6.png")
+        try MediaIO.exportPhoto(url: rampSource, to: dithered, recipe: recipe, format: .png)
+        recipe.schemaVersion = 5; recipe.rendererVersion = 5
+        let legacy = folder.appendingPathComponent("ramp-v5.png")
+        try MediaIO.exportPhoto(url: rampSource, to: legacy, recipe: recipe, format: .png)
+        func codes(_ url: URL) throws -> Set<UInt8> {
+            let source = try XCTUnwrap(CGImageSourceCreateWithURL(url as CFURL, nil))
+            let image = try XCTUnwrap(CGImageSourceCreateImageAtIndex(source, 0, nil))
+            XCTAssertEqual(image.bitsPerComponent, 8)
+            let bytes = Array(try XCTUnwrap(image.dataProvider?.data) as Data)
+            return Set(stride(from: 1, to: bytes.count, by: max(1, image.bitsPerPixel / 8)).map { bytes[$0] })
+        }
+        let legacyCodes = try codes(legacy), ditherCodes = try codes(dithered)
+        print("CP6_PNG_DITHER legacy_codes=\(legacyCodes.sorted()) v6_codes=\(ditherCodes.sorted())")
+        XCTAssertGreaterThan(ditherCodes.count, legacyCodes.count)
     }
 
     func testSourceNoiseAnalysisOnSuppliedPhotoAndGoPro() async throws {
@@ -143,14 +243,14 @@ final class MediaIntegrationTests: XCTestCase {
         let video = fixtures.appendingPathComponent("test_media/videos/GX011247.MP4")
         model.importURLs([photo, video])
         let photoRecipe = try XCTUnwrap(model.items.first { $0.current.sourcePath == photo.path }?.current)
-        XCTAssertEqual(photoRecipe.rendererVersion, 5)
+        XCTAssertEqual(photoRecipe.rendererVersion, 6)
         XCTAssertEqual(photoRecipe.sourceColor?.dynamicRange, .sdr)
         for _ in 0..<50 {
             if model.items.first(where: { $0.current.sourcePath == video.path })?.current.sourceColor != nil { break }
             try await Task.sleep(for: .milliseconds(100))
         }
         let videoRecipe = try XCTUnwrap(model.items.first { $0.current.sourcePath == video.path }?.current)
-        XCTAssertEqual(videoRecipe.rendererVersion, 5)
+        XCTAssertEqual(videoRecipe.rendererVersion, 6)
         XCTAssertEqual(videoRecipe.sourceColor?.sourceBitDepth, 10)
         XCTAssertEqual(videoRecipe.sourceColor?.dynamicRange, .sdr)
         XCTAssertEqual(try store.load(id: photoRecipe.id).current.sourceColor, photoRecipe.sourceColor)
@@ -211,6 +311,7 @@ final class MediaIntegrationTests: XCTestCase {
         color.setEffective(.aquaHue, to: 20)
         var recipe = EditRecipe(sourcePath: source.path, kind: .photo)
         recipe.color = color
+        recipe.detail.sharpening = 30
         let photoIdentity = try SourceNoiseAnalysis.identity(recipe: recipe, url: source)
         recipe.noiseAnalysis = try await SourceNoiseAnalysis.analyze(url: source, recipe: recipe, identity: photoIdentity)
         recipe.geometry.aspect = .fourFive
@@ -354,6 +455,7 @@ final class MediaIntegrationTests: XCTestCase {
         recipe.color.setEffective(.dehaze, to: 20)
         recipe.detail.colorNoise = 60
         recipe.detail.luminanceNoise = 25
+        recipe.detail.sharpening = 25
         recipe.videoTrim.startSeconds = 0.3
         recipe.videoTrim.endSeconds = 2.5
         recipe.geometry.aspect = .fourFive
@@ -388,6 +490,7 @@ final class MediaIntegrationTests: XCTestCase {
         let exportedFormats = try await track.load(.formatDescriptions)
         let exportedFormat = try XCTUnwrap(exportedFormats.first)
         let outputMetadata = CMFormatDescriptionGetExtensions(exportedFormat) as? [String: Any]
+        print("CP6_H264 depth=\(String(describing: outputMetadata?["BitsPerComponent"])) fullRange=\(String(describing: outputMetadata?["FullRangeVideo"]))")
         XCTAssertEqual(outputMetadata?["CVImageBufferColorPrimaries"] as? String, "ITU_R_709_2")
         XCTAssertEqual(outputMetadata?["CVImageBufferTransferFunction"] as? String, "ITU_R_709_2")
         XCTAssertEqual(outputMetadata?["CVImageBufferYCbCrMatrix"] as? String, "ITU_R_709_2")
@@ -405,6 +508,30 @@ final class MediaIntegrationTests: XCTestCase {
         let outputAudioFormat = try XCTUnwrap(outputAudioFormats.first)
         XCTAssertEqual(CMAudioFormatDescriptionGetStreamBasicDescription(outputAudioFormat)?.pointee.mChannelsPerFrame, 2)
         XCTAssertEqual(try checksum(source), before)
+    }
+
+    func testV6NeutralMain10DecodedColorAgainstSource() async throws {
+        let source = fixtures.appendingPathComponent("test_media/videos/GX011247.MP4")
+        let originalHash = try checksum(source)
+        let output = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".mp4")
+        defer { try? FileManager.default.removeItem(at: output) }
+        var recipe = EditRecipe(sourcePath: source.path, kind: .video)
+        recipe.videoCodec = .hevc
+        recipe.outputFrame = OutputFrame(width: 540, height: 960, mode: .fit)
+        recipe.videoTrim.endSeconds = 0.6
+        try await MediaIO.exportVideo(url: source, to: output, recipe: recipe)
+        let inputGenerator = AVAssetImageGenerator(asset: AVURLAsset(url: source))
+        inputGenerator.appliesPreferredTrackTransform = true
+        inputGenerator.maximumSize = CGSize(width: 256, height: 256)
+        let sourceFrame = try await inputGenerator.image(at: CMTime(seconds: 0.3, preferredTimescale: 600)).image
+        let outputGenerator = AVAssetImageGenerator(asset: AVURLAsset(url: output))
+        outputGenerator.appliesPreferredTrackTransform = true
+        outputGenerator.maximumSize = CGSize(width: 256, height: 256)
+        let exportedFrame = try await outputGenerator.image(at: CMTime(seconds: 0.3, preferredTimescale: 600)).image
+        let difference = meanRGBDifference(sourceFrame, exportedFrame)
+        print("CP6_NEUTRAL_SOURCE_EXPORT mean_rgb_difference=\(difference)")
+        XCTAssertLessThan(difference, 0.05)
+        XCTAssertEqual(try checksum(source), originalHash)
     }
 
     func testVisionForegroundTrial() throws {
@@ -520,6 +647,29 @@ final class MediaIntegrationTests: XCTestCase {
         let codec = CMFormatDescriptionGetMediaSubType(format)
         XCTAssertTrue(codec == 0x68766331 || codec == 0x68657631)
         let metadata = CMFormatDescriptionGetExtensions(format) as? [String: Any]
+        print("CP6_HEVC subtype=\(codec) depth=\(String(describing: metadata?["BitsPerComponent"])) matrix=\(String(describing: metadata?["CVImageBufferYCbCrMatrix"])) fullRange=\(String(describing: metadata?["FullRangeVideo"]))")
+        XCTAssertEqual(codec, 0x68766331)
+        XCTAssertEqual(metadata?["BitsPerComponent"] as? Int, 10)
+        let original = AVURLAsset(url: source)
+        let originalTracks = try await original.loadTracks(withMediaType: .video)
+        let originalTrack = try XCTUnwrap(originalTracks.first)
+        let sourceCodes = try decodedTenBitLuma(original, track: originalTrack)
+        let outputCodes = try decodedTenBitLuma(asset, track: track)
+        print("CP6_10BIT_CODES source_low_bits=\(Set(sourceCodes.map { $0 & 3 }).count) output_low_bits=\(Set(outputCodes.map { $0 & 3 }).count) output_unique=\(Set(outputCodes).count)")
+        XCTAssertGreaterThan(Set(outputCodes.map { $0 & 3 }).count, 1)
+        let previewItem = try await MediaIO.videoItem(url: source, recipe: recipe)
+        let previewGenerator = AVAssetImageGenerator(asset: original)
+        previewGenerator.videoComposition = previewItem.videoComposition
+        previewGenerator.appliesPreferredTrackTransform = true
+        previewGenerator.maximumSize = CGSize(width: 256, height: 256)
+        let previewFrame = try await previewGenerator.image(at: CMTime(seconds: 0.5, preferredTimescale: 600)).image
+        let outputGenerator = AVAssetImageGenerator(asset: asset)
+        outputGenerator.appliesPreferredTrackTransform = true
+        outputGenerator.maximumSize = CGSize(width: 256, height: 256)
+        let outputFrame = try await outputGenerator.image(at: CMTime(seconds: 0.5, preferredTimescale: 600)).image
+        let decodedDifference = meanRGBDifference(previewFrame, outputFrame)
+        print("CP6_HEVC_PREVIEW_EXPORT mean_rgb_difference=\(decodedDifference)")
+        XCTAssertLessThan(decodedDifference, 0.05)
         XCTAssertEqual(metadata?["CVImageBufferColorPrimaries"] as? String, "ITU_R_709_2")
         XCTAssertEqual(metadata?["CVImageBufferTransferFunction"] as? String, "ITU_R_709_2")
         let audioTracks = try await asset.loadTracks(withMediaType: .audio)

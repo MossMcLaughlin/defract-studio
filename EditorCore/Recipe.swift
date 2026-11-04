@@ -184,7 +184,30 @@ public struct TechnicalDetail: Codable, Equatable, Sendable {
     public var autoProtection = true
     public var colorNoise = 0.0
     public var luminanceNoise = 0.0
+    public var sharpening = 0.0
     public init() {}
+
+    private enum CodingKeys: String, CodingKey {
+        case version, autoProtection, colorNoise, luminanceNoise, sharpening
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        version = try values.decodeIfPresent(Int.self, forKey: .version) ?? 1
+        autoProtection = try values.decodeIfPresent(Bool.self, forKey: .autoProtection) ?? true
+        colorNoise = try values.decodeIfPresent(Double.self, forKey: .colorNoise) ?? 0
+        luminanceNoise = try values.decodeIfPresent(Double.self, forKey: .luminanceNoise) ?? 0
+        sharpening = try values.decodeIfPresent(Double.self, forKey: .sharpening) ?? 0
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(version, forKey: .version)
+        try values.encode(autoProtection, forKey: .autoProtection)
+        try values.encode(colorNoise, forKey: .colorNoise)
+        try values.encode(luminanceNoise, forKey: .luminanceNoise)
+        try values.encode(sharpening, forKey: .sharpening)
+    }
 }
 
 public struct NoiseAnalysisIdentity: Codable, Equatable, Sendable {
@@ -253,8 +276,8 @@ public struct EditRecipe: Codable, Equatable, Sendable {
     public init(sourcePath: String, kind: MediaKind) {
         self.sourcePath = sourcePath
         self.kind = kind
-        self.schemaVersion = 5
-        self.rendererVersion = 5
+        self.schemaVersion = 6
+        self.rendererVersion = 6
         self.color = ColorState(mappingVersion: 2)
         self.technicalDetail = TechnicalDetail()
     }
@@ -263,6 +286,7 @@ public struct EditRecipe: Codable, Equatable, Sendable {
         let edited = easyIsEdited || !color.manualDelta.isNeutral || !masks.isEmpty
             || geometry != Geometry() || videoTrim != VideoTrim() || outputFrame != nil
             || (rendererVersion ?? 1) >= 4 && (detail.colorNoise != 0 || detail.luminanceNoise != 0 || !detail.autoProtection)
+            || (rendererVersion ?? 1) >= 6 && detail.sharpening != 0
         guard edited else { return false }
         guard let lastExportedAt else { return true }
         return lastModified > lastExportedAt

@@ -47,7 +47,7 @@ struct ExportSheet: View {
                 } else {
                     Picker("Codec", selection: $options.videoCodec) {
                         Text("H.264 · compatible").tag(VideoCodec.h264)
-                        Text("HEVC · smaller file").tag(VideoCodec.hevc)
+                        Text("HEVC · Main 10 for 10-bit source").tag(VideoCodec.hevc)
                     }
                 }
                 TextField("File name", text: $options.name)
@@ -89,7 +89,12 @@ struct ExportSheet: View {
                 EditorApplicationDelegate.quitPending = false
             }
         }
-        .onChange(of: options.preset) { _, _ in updateSize() }
+        .onChange(of: options.preset) { _, preset in
+            if model.kind == .video && (model.draft?.rendererVersion ?? 1) >= 6 {
+                options.videoCodec = preset == .maximum ? .hevc : .h264
+            }
+            updateSize()
+        }
         .onChange(of: options.aspect) { _, _ in updateSize() }
         .onChange(of: options.outputFrame) { _, frame in model.previewExport(frame) }
         .confirmationDialog("Replace the existing export?", isPresented: $showReplace) {

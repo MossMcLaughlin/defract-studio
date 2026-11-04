@@ -498,6 +498,7 @@ struct EditorView: View {
                 .toggleStyle(.switch).help("Apply measured noise protection when the grade would reveal source noise.")
                 detailSlider("Color Noise", \.colorNoise)
                 detailSlider("Luminance Noise", \.luminanceNoise)
+                if (model.draft?.rendererVersion ?? 1) >= 6 { detailSlider("Sharpening", \.sharpening) }
                 if model.draft?.noiseAnalysis == nil {
                     Text("Auto protection is waiting for source analysis. Manual Detail controls work now.")
                         .font(EditorTheme.helper).foregroundStyle(EditorTheme.secondaryText)
