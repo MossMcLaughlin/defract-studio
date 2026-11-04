@@ -264,15 +264,12 @@ final class MediaIntegrationTests: XCTestCase {
         XCTAssertEqual(videoRecipe.rendererVersion, 6)
         XCTAssertEqual(videoRecipe.sourceColor?.sourceBitDepth, 10)
         XCTAssertEqual(videoRecipe.sourceColor?.dynamicRange, .sdr)
-        XCTAssertEqual(try store.load(id: photoRecipe.id).current.sourceColor, photoRecipe.sourceColor)
-        XCTAssertEqual(try store.load(id: videoRecipe.id).current.sourceColor, videoRecipe.sourceColor)
         for _ in 0..<80 {
             if model.items.first(where: { $0.current.id == videoRecipe.id })?.current.noiseAnalysis != nil { break }
             try await Task.sleep(for: .milliseconds(100))
         }
         let analyzedVideo = try XCTUnwrap(model.items.first(where: { $0.current.id == videoRecipe.id })?.current.noiseAnalysis)
         XCTAssertEqual(analyzedVideo.frameCount, 3)
-        XCTAssertEqual(try store.load(id: videoRecipe.id).current.noiseAnalysis, analyzedVideo)
         model.select(photoRecipe.id)
         for _ in 0..<80 {
             if model.items.first(where: { $0.current.id == photoRecipe.id })?.current.noiseAnalysis != nil { break }
@@ -280,7 +277,14 @@ final class MediaIntegrationTests: XCTestCase {
         }
         let analyzedPhoto = try XCTUnwrap(model.items.first(where: { $0.current.id == photoRecipe.id })?.current.noiseAnalysis)
         XCTAssertEqual(analyzedPhoto.frameCount, 1)
-        XCTAssertEqual(try store.load(id: photoRecipe.id).current.noiseAnalysis, analyzedPhoto)
+        let project = folder.appendingPathComponent("Sources.defractproject")
+        try model.saveProject(to: project)
+        let reopened = EditorModel(store: store)
+        reopened.openProject(project)
+        XCTAssertEqual(reopened.items.first { $0.current.id == photoRecipe.id }?.current.sourceColor, photoRecipe.sourceColor)
+        XCTAssertEqual(reopened.items.first { $0.current.id == videoRecipe.id }?.current.sourceColor, videoRecipe.sourceColor)
+        XCTAssertEqual(reopened.items.first { $0.current.id == photoRecipe.id }?.current.noiseAnalysis, analyzedPhoto)
+        XCTAssertEqual(reopened.items.first { $0.current.id == videoRecipe.id }?.current.noiseAnalysis, analyzedVideo)
     }
 
     func testNeutralV2PhotoMatchesLegacySDRBaseline() throws {
@@ -375,6 +379,9 @@ final class MediaIntegrationTests: XCTestCase {
 
     func testReefPNGPortraitAndAlphaExport() throws {
         let source = fixtures.appendingPathComponent("test_media/photos/image.png")
+        guard FileManager.default.fileExists(atPath: source.path) else {
+            throw XCTSkip("Optional local reef PNG fixture is absent")
+        }
         let before = try checksum(source)
         let output = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".png")
         defer { try? FileManager.default.removeItem(at: output) }
@@ -628,13 +635,14 @@ final class MediaIntegrationTests: XCTestCase {
         model.endStroke()
         XCTAssertEqual(model.items[0].undoStack.count, 3)
         XCTAssertEqual(model.draft?.masks[0].strokes[0].points.count, 2)
+        let project = directory.appendingPathComponent("Brush.defractproject")
+        try model.saveProject(to: project)
         let reopened = EditorModel(store: store)
+        reopened.openProject(project)
         XCTAssertEqual(reopened.draft?.masks[0].strokes[0].points.count, 2)
         XCTAssertEqual(reopened.draft?.masks[0].adjustment[.exposure], 0.4)
-        reopened.undo()
-        XCTAssertEqual(reopened.draft?.masks[0].strokes.count, 0)
-        reopened.redo()
-        XCTAssertEqual(reopened.draft?.masks[0].strokes.count, 1)
+        XCTAssertFalse(reopened.canUndo)
+        XCTAssertFalse(reopened.canRedo)
     }
 
     func testVideoQuarterTurnProducesLandscapeOutput() async throws {
@@ -785,5 +793,78 @@ final class MediaIntegrationTests: XCTestCase {
         recipe.rendererVersion = 5
         let legacy = try await MediaIO.videoItem(url: source, recipe: recipe)
         XCTAssertEqual(legacy.videoComposition?.renderSize, full.renderSize)
+    }
+
+    @MainActor func testProjectSaveNewOpenMissingAndTrash() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let store = ProjectStore(directory: folder.appendingPathComponent("legacy"))
+        let source = fixtures.appendingPathComponent("test_media/photos/P7310233.JPG")
+        let original = try checksum(source)
+        let project = folder.appendingPathComponent("Dive.defractproject")
+        let model = EditorModel(store: store)
+        model.importURLs([source])
+        model.change { $0.color.setEffective(.exposure, to: 0.4); $0.geometry.aspect = .fourFive }
+        model.addMask(.brush)
+        for _ in 0..<50 where model.items.first?.current.noiseAnalysis == nil {
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        let saved = try XCTUnwrap(model.draft)
+        let missing = EditRecipe(sourcePath: folder.appendingPathComponent("offline.JPG").path, kind: .photo)
+        model.items.append(EditHistory(missing))
+        try model.saveProject(to: project)
+        XCTAssertFalse(model.projectDirty)
+        model.newProject()
+        XCTAssertTrue(model.items.isEmpty)
+        XCTAssertNil(model.selectedID)
+        XCTAssertFalse(model.canUndo)
+        model.openProject(project)
+        XCTAssertEqual(model.items.count, 2)
+        XCTAssertEqual(model.visibleItems.count, 1)
+        XCTAssertEqual(model.missingSources, ["offline.JPG"])
+        XCTAssertEqual(model.draft?.color.effective[.exposure], saved.color.effective[.exposure])
+        XCTAssertEqual(model.draft?.masks, saved.masks)
+        XCTAssertEqual(model.draft?.geometry, saved.geometry)
+        XCTAssertFalse(model.canUndo)
+        XCTAssertEqual(try checksum(source), original)
+        try model.moveCurrentProjectToTrash()
+        XCTAssertNil(model.projectURL)
+        XCTAssertTrue(model.items.isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: project.path))
+        XCTAssertEqual(try checksum(source), original)
+    }
+
+    @MainActor func testMissingProjectDeletionKeepsEditorState() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let project = folder.appendingPathComponent("Moved.defractproject")
+        let model = EditorModel(store: ProjectStore(directory: folder.appendingPathComponent("legacy")))
+        model.importURLs([fixtures.appendingPathComponent("test_media/photos/P7310233.JPG")])
+        try model.saveProject(to: project)
+        try FileManager.default.moveItem(at: project, to: folder.appendingPathComponent("Elsewhere.defractproject"))
+        XCTAssertThrowsError(try model.moveCurrentProjectToTrash())
+        XCTAssertEqual(model.projectURL, project)
+        XCTAssertEqual(model.items.count, 1)
+    }
+
+    @MainActor func testLegacySessionMigratesOnlyAfterSave() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let store = ProjectStore(directory: folder.appendingPathComponent("legacy"))
+        let source = fixtures.appendingPathComponent("test_media/photos/P7310233.JPG")
+        let recipe = EditRecipe(sourcePath: source.path, kind: .photo)
+        try store.save(EditHistory(recipe))
+        let model = EditorModel(store: store)
+        XCTAssertTrue(model.projectDirty)
+        XCTAssertEqual(model.selectedID, recipe.id)
+        XCTAssertEqual(try store.load(id: recipe.id).current, recipe)
+        let project = folder.appendingPathComponent("Recovered.defractproject")
+        try model.saveProject(to: project)
+        XCTAssertThrowsError(try store.load(id: recipe.id))
+        let reopened = EditorModel(store: store)
+        XCTAssertTrue(reopened.items.isEmpty)
+        reopened.openProject(project)
+        XCTAssertEqual(reopened.draft?.id, recipe.id)
+        XCTAssertEqual(reopened.draft?.sourcePath, recipe.sourcePath)
     }
 }

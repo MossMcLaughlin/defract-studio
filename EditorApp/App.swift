@@ -7,17 +7,29 @@ import EditorCore
 @main
 struct EditorApp: App {
     @NSApplicationDelegateAdaptor(EditorApplicationDelegate.self) private var applicationDelegate
+    @StateObject private var model = EditorModel()
     var body: some Scene {
         WindowGroup("Defract Studio") {
-            EditorView()
+            EditorView(model: model)
                 .frame(minWidth: 900, minHeight: 600)
+        }
+        .commands {
+            CommandGroup(replacing: .newItem) {
+                Button("New Project", action: model.newProject).keyboardShortcut("n")
+                Button("Open Project…", action: model.openProject).keyboardShortcut("o")
+            }
+            CommandGroup(replacing: .saveItem) {
+                Button("Save Project", action: { _ = model.saveProject() }).keyboardShortcut("s")
+                Button("Save Project As…", action: { _ = model.saveProject(as: true) }).keyboardShortcut("s", modifiers: [.command, .shift])
+                Button("Delete Project…", action: model.deleteProject).disabled(model.projectURL == nil)
+            }
         }
     }
 }
 
 
 struct EditorView: View {
-    @StateObject private var model = EditorModel()
+    @ObservedObject var model: EditorModel
     @AppStorage("sidebarVisible") private var sidebarVisible = true
     @AppStorage("inspectorMode") private var inspectorMode = "Advanced"
     @AppStorage("inspectorTab") private var inspectorTab = "Global"
@@ -52,7 +64,21 @@ struct EditorView: View {
                 if ($0.rendererVersion ?? 1) >= 4 { $0.detail = TechnicalDetail() }
             } }
         }
+        .sheet(isPresented: Binding(get: { !model.missingSources.isEmpty }, set: { if !$0 { model.missingSources = [] } })) {
+            VStack(alignment: .leading, spacing: 14) {
+                Text("Missing source files").font(.headline)
+                Text("\(model.missingSources.count) previously linked files could not be found. They will be hidden from the media browser.")
+                DisclosureGroup("View missing files") {
+                    ForEach(model.missingSources, id: \.self) { Text($0).frame(maxWidth: .infinity, alignment: .leading) }
+                }
+                HStack { Spacer(); Button("OK") { model.missingSources = [] }.keyboardShortcut(.defaultAction) }
+            }.padding(24).frame(width: 390)
+        }
         .onAppear { model.maskPanelActive = inspectorTab == "Masks"; model.refresh() }
+        .onChange(of: model.workspaceRevision) { _, _ in
+            zoom = 1; pan = .zero; panAtDragStart = nil
+            painting = false; hoverLocation = nil
+        }
         .sheet(isPresented: $model.exportSheetRequested) { ExportSheet(model: model) }
         .background(WindowCloseObserver(model: model).frame(width: 0, height: 0))
     }
@@ -114,14 +140,14 @@ struct EditorView: View {
     private var sidebar: some View {
         VStack(spacing: 6) {
             HStack {
-                Button("Import", action: model.importFiles).keyboardShortcut("o", modifiers: .command)
+                Button("Import", action: model.importFiles)
                 Spacer()
                 Button { sidebarVisible = false } label: { Image(systemName: "sidebar.left") }
                     .help("Hide Files").accessibilityLabel("Hide Files")
             }.buttonStyle(.borderless).padding(.horizontal, 8).padding(.top, 8)
             ScrollView {
             LazyVStack(alignment: .leading, spacing: 4) {
-                ForEach(model.items, id: \.current.id) { history in
+                ForEach(model.visibleItems, id: \.current.id) { history in
                     let recipe = history.current
                     Button {
                         model.select(recipe.id)

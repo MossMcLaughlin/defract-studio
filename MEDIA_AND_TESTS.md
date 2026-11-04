@@ -12,7 +12,7 @@
 | `P7310233.JPG` | JPEG, 1536×2048 | Deep blue diver with high cast | Easy asymmetric blue corrections + mask fallback; no invented reds |
 | `P8110319.JPG` | JPEG, 1536×2048 | Deep blue mola mola | Foreground Vision feasibility and brush fallback; strong blue scene |
 | `B663700C-50E6-4C26-B95F-25C7E5F271E9.JPG` | JPEG, 1792×2048 | Divers/people in blue water | Subject detection, brush feather, skin/suit/water tradeoff |
-| `image.png` | PNG RGBA, 638×1130 | Reef and fish portrait | Preserve portrait aspect and alpha behavior; export horizontal/vertical choices |
+| `image.png` | PNG RGBA, 638×1130; absent from the current local `test_media/` checkout | Reef and fish portrait | Its export test skips until the original fixture is restored; do not substitute another image when claiming this coverage |
 | `GX011123.MP4` | HEVC Main, 5312×2988 coded, 29.97fps, Rec.709, 8-bit; display rotation **+90°** | Portrait GoPro clip, audio, upright import and export | Display must obey transform, not be wrongly landscape or cropped |
 | `GX011176.MP4` | HEVC Main, 5312×2988 coded, 29.97fps, Rec.709, 8-bit; display rotation **−90°** | Opposite portrait orientation, audio, edit/trim/export | Vertical output must be correct even though encoded dimensions are landscape |
 | `GX011247.MP4` | **HEVC Main 10, 10-bit** (`yuv420p10le`), 5312×2988 coded, 30000/1001 fps (29.97), **SDR Rec.709** (primaries/transfer/matrix `bt709`), full-range (`pc`), display rotation **−90°**, AAC stereo 48 kHz; duration ~3.470 s | Verify genuine 10-bit decoding, neutral/graded preview vs output, upright portrait playback/export, trim and audio | **Do not claim HDR** for this fixture; maintain suitable working precision and intentional Rec.709 SDR output |

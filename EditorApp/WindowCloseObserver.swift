@@ -7,7 +7,7 @@ final class EditorApplicationDelegate: NSObject, NSApplicationDelegate {
     static var windows: [WindowCloseObserver.Coordinator] = []
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard let dirty = Self.windows.first(where: { $0.model.hasUnexportedEdits }) else {
+        guard let dirty = Self.windows.first(where: { $0.model.projectDirty || $0.model.autosaveFailed || $0.model.hasUnexportedEdits }) else {
             Self.quitPending = false
             return .terminateNow
         }
@@ -31,6 +31,7 @@ struct WindowCloseObserver: NSViewRepresentable {
 
     func updateNSView(_ view: InstallingView, context: Context) {
         context.coordinator.model = model
+        context.coordinator.window?.title = model.projectName
     }
 
     final class InstallingView: NSView {
@@ -54,13 +55,21 @@ struct WindowCloseObserver: NSViewRepresentable {
             guard self.window !== window else { return }
             previousDelegate = window.delegate
             self.window = window
+            window.title = model.projectName
             window.delegate = self
             EditorApplicationDelegate.windows.append(self)
             model.closeWindowAfterExport = { [weak self] in self?.window?.performClose(nil) }
         }
 
         func windowShouldClose(_ sender: NSWindow) -> Bool {
-            if allowClose || !model.hasUnexportedEdits {
+            if model.busy {
+                model.error = "Finish or cancel the export before closing."
+                return false
+            }
+            if model.projectDirty || model.autosaveFailed {
+                return model.saveForClose() && (previousDelegate?.windowShouldClose?(sender) ?? true)
+            }
+            if allowClose || model.projectURL != nil || !model.hasUnexportedEdits {
                 return previousDelegate?.windowShouldClose?(sender) ?? true
             }
             guard !prompting else { return false }

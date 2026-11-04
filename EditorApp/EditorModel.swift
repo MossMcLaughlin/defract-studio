@@ -3,6 +3,12 @@ import AppKit
 import AVKit
 import EditorCore
 
+private struct ProjectFile: Codable {
+    var version = 1
+    var items: [EditHistory]
+    var selectedID: UUID?
+}
+
 @MainActor
 final class EditorModel: ObservableObject {
     @Published var items: [EditHistory] = []
@@ -28,6 +34,9 @@ final class EditorModel: ObservableObject {
     @Published var exportProgress = 0.0
     @Published var lastExportURL: URL?
     @Published var exportPreviewFrame: OutputFrame?
+    @Published var projectURL: URL?
+    @Published var projectDirty = false
+    @Published var missingSources: [String] = []
     var closeAfterExport = false
     var closeWindowAfterExport: (() -> Void)?
 
@@ -42,6 +51,9 @@ final class EditorModel: ObservableObject {
     private var analysisRevision = 0
     private var analysisRequestIdentity: NoiseAnalysisIdentity?
     private var previewSourcePath: String?
+    private var legacyRecovery = false
+    @Published private(set) var workspaceRevision = 0
+    private var colorProbeTasks: [Task<Void, Never>] = []
 
     init(store: ProjectStore? = nil) {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -49,16 +61,136 @@ final class EditorModel: ObservableObject {
         do {
             let loaded = try self.store.loadRecovering()
             items = loaded.histories.sorted { $0.current.lastModified > $1.current.lastModified }
+            legacyRecovery = !items.isEmpty
             if !loaded.failedFiles.isEmpty {
                 error = "Some saved sessions could not be opened. Their files were kept for recovery: \(loaded.failedFiles.map(\.lastPathComponent).joined(separator: ", "))"
             }
             let remembered = UserDefaults.standard.string(forKey: "selectedMediaID")
-            let selected = items.first { $0.current.id.uuidString == remembered } ?? items.first
+            let available = visibleItems
+            let selected = available.first { $0.current.id.uuidString == remembered } ?? available.first
             if let selected { select(selected.current.id) }
+            checkMissingSources()
+            projectDirty = legacyRecovery
         } catch { self.error = "Saved edits could not be loaded: \(error.localizedDescription)" }
     }
 
     var selectedID: UUID? { draft?.id }
+    var visibleItems: [EditHistory] { items.filter { FileManager.default.fileExists(atPath: $0.current.sourcePath) } }
+    var projectName: String { projectURL?.deletingPathExtension().lastPathComponent ?? "Untitled Project" }
+
+    private func checkMissingSources() {
+        missingSources = items.filter { !FileManager.default.fileExists(atPath: $0.current.sourcePath) }
+            .map { URL(fileURLWithPath: $0.current.sourcePath).lastPathComponent }
+    }
+
+    private func clearWorkspace() {
+        workspaceRevision += 1
+        renderingRevision += 1
+        analysisRevision += 1
+        previewTask?.cancel(); analysisTask?.cancel(); subjectTask?.cancel()
+        colorProbeTasks.forEach { $0.cancel() }; colorProbeTasks.removeAll()
+        player?.pause(); player = nil; image = nil; draft = nil; items = []
+        selectedMaskID = nil; previewSourcePath = nil; sourceSize = .zero
+        duration = 0; seconds = 0; gestureStart = nil; cropEditing = false
+        exportPreviewFrame = nil; exportSheetRequested = false; lastExportURL = nil
+        projectURL = nil; projectDirty = false; legacyRecovery = false
+        missingSources = []; error = nil; autosaveFailed = false
+        UserDefaults.standard.removeObject(forKey: "selectedMediaID")
+    }
+
+    private func retireLegacy() throws {
+        guard legacyRecovery else { return }
+        for history in items {
+            let file = store.directory.appendingPathComponent(history.current.id.uuidString + ".json")
+            if FileManager.default.fileExists(atPath: file.path) { try FileManager.default.removeItem(at: file) }
+        }
+        legacyRecovery = false
+    }
+
+    @discardableResult func saveProject(to destination: URL) throws -> Bool {
+        try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let file = ProjectFile(items: items.map { EditHistory($0.current) }, selectedID: selectedID)
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .millisecondsSince1970
+        try encoder.encode(file).write(to: destination, options: .atomic)
+        try retireLegacy()
+        projectURL = destination; projectDirty = false
+        return true
+    }
+
+    func saveProject(as copy: Bool = false) -> Bool {
+        if let projectURL, !copy {
+            do { try saveProject(to: projectURL); return true }
+            catch { self.error = "Could not save project: \(error.localizedDescription)"; return false }
+        }
+        let panel = NSSavePanel(); panel.allowedContentTypes = [.init(filenameExtension: "defractproject")!]
+        panel.nameFieldStringValue = projectURL?.lastPathComponent ?? "Untitled.defractproject"
+        guard panel.runModal() == .OK, let url = panel.url else { return false }
+        do { try saveProject(to: url); return true }
+        catch { self.error = "Could not save project: \(error.localizedDescription)"; return false }
+    }
+
+    func confirmTransition() -> Bool {
+        guard projectDirty || autosaveFailed else { return true }
+        let alert = NSAlert(); alert.messageText = "Save changes to \(projectName)?"
+        alert.informativeText = "Your project edits and imported file references will be lost if discarded. Original media will remain untouched."
+        alert.addButton(withTitle: "Save"); alert.addButton(withTitle: "Discard"); alert.addButton(withTitle: "Cancel")
+        switch alert.runModal() {
+        case .alertFirstButtonReturn: return saveProject()
+        case .alertSecondButtonReturn:
+            do { try retireLegacy(); return true }
+            catch { self.error = "Could not discard recovered session: \(error.localizedDescription)"; return false }
+        default: return false
+        }
+    }
+
+    func newProject() {
+        guard !busy, confirmTransition() else { return }
+        clearWorkspace()
+    }
+
+    func openProject() {
+        guard !busy else { return }
+        let panel = NSOpenPanel(); panel.allowedContentTypes = [.init(filenameExtension: "defractproject")!]
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        openProject(url)
+    }
+
+    func openProject(_ url: URL) {
+        guard !busy else { return }
+        do {
+            let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .millisecondsSince1970
+            let file = try decoder.decode(ProjectFile.self, from: Data(contentsOf: url))
+            guard file.version == 1, file.items.allSatisfy({ (1...6).contains($0.current.schemaVersion) &&
+                ($0.current.rendererVersion ?? 1) == $0.current.schemaVersion &&
+                $0.current.color.underwaterMappingVersion == ($0.current.schemaVersion >= 5 ? 2 : 1) }) else {
+                throw CocoaError(.fileReadCorruptFile)
+            }
+            guard confirmTransition() else { return }
+            clearWorkspace()
+            items = file.items.map { EditHistory($0.current) }
+            projectURL = url
+            checkMissingSources()
+            if let selected = visibleItems.first(where: { $0.current.id == file.selectedID }) ?? visibleItems.first { select(selected.current.id) }
+            projectDirty = false
+        } catch { self.error = "Could not open project: \(error.localizedDescription)" }
+    }
+
+    func deleteProject() {
+        guard let url = projectURL, !busy else { return }
+        let alert = NSAlert(); alert.messageText = "Delete “\(projectName)”?"
+        alert.informativeText = "The saved project and its edits will be moved to Trash. Original photos, videos, and exported files will not be deleted." + (projectDirty ? " Unsaved project changes will also be discarded." : "")
+        alert.addButton(withTitle: "Cancel"); alert.addButton(withTitle: "Move Project to Trash")
+        guard alert.runModal() == .alertSecondButtonReturn else { return }
+        do { try moveCurrentProjectToTrash() }
+        catch { self.error = "Could not move project to Trash: \(error.localizedDescription)" }
+    }
+
+    func moveCurrentProjectToTrash() throws {
+        guard let url = projectURL else { throw CocoaError(.fileNoSuchFile) }
+        try FileManager.default.trashItem(at: url, resultingItemURL: nil)
+        clearWorkspace()
+    }
     var kind: MediaKind? { draft?.kind }
     var canUndo: Bool { items.first { $0.current.id == selectedID }?.undoStack.isEmpty == false }
     var canRedo: Bool { items.first { $0.current.id == selectedID }?.redoStack.isEmpty == false }
@@ -86,8 +218,9 @@ final class EditorModel: ObservableObject {
                 }
                 let history = EditHistory(recipe)
                 do {
-                    try store.save(history)
+                    if legacyRecovery { try store.save(history) }
                     items.append(history)
+                    projectDirty = true
                     select(history.current.id)
                     if kind == .video {
                         scheduleVideoColorProbe(id: history.current.id, url: url, expectedSize: recipe.sourceFileSize)
@@ -98,9 +231,11 @@ final class EditorModel: ObservableObject {
     }
 
     private func scheduleVideoColorProbe(id: UUID, url: URL, expectedSize: Int64?) {
-        Task {
+        let revision = workspaceRevision
+        let work = Task {
             do {
                 let descriptor = try await MediaIO.sourceColorDescriptor(url: url, kind: .video)
+                guard revision == workspaceRevision else { return }
                 guard let index = items.firstIndex(where: { $0.current.id == id }),
                       items[index].current.sourcePath == url.path,
                       items[index].current.sourceFileSize == expectedSize else { return }
@@ -114,12 +249,16 @@ final class EditorModel: ObservableObject {
                 if descriptor.dynamicRange == .hlg || descriptor.dynamicRange == .pq {
                     error = "This HDR source needs a verified SDR conversion before editing or export."
                 }
-            } catch { self.error = "Source color metadata could not be read: \(error.localizedDescription)" }
+            } catch {
+                if revision == workspaceRevision { self.error = "Source color metadata could not be read: \(error.localizedDescription)" }
+            }
         }
+        colorProbeTasks.append(work)
     }
 
     func select(_ id: UUID) {
         guard let history = items.first(where: { $0.current.id == id }) else { return }
+        guard FileManager.default.fileExists(atPath: history.current.sourcePath) else { return }
         let changedSource = selectedID != id
         if changedSource {
             analysisTask?.cancel()
@@ -132,6 +271,7 @@ final class EditorModel: ObservableObject {
         cropEditing = false
         if changedSource { lastExportURL = nil; exportProgress = 0; previewSourcePath = nil }
         UserDefaults.standard.set(id.uuidString, forKey: "selectedMediaID")
+        if projectURL != nil && changedSource { projectDirty = true }
         scheduleNoiseAnalysisIfNeeded()
         refresh()
     }
@@ -243,7 +383,8 @@ final class EditorModel: ObservableObject {
         guard let draft, let index = items.firstIndex(where: { $0.current.id == draft.id }) else { return }
         items[index].apply { $0 = draft }
         self.draft = items[index].current
-        do { try store.save(items[index]); autosaveFailed = false }
+        projectDirty = true
+        do { if legacyRecovery { try store.save(items[index]) }; autosaveFailed = false }
         catch { autosaveFailed = true; self.error = "Autosave failed; edits remain in memory. \(error.localizedDescription)" }
     }
 
@@ -251,6 +392,7 @@ final class EditorModel: ObservableObject {
         guard let id = selectedID, let index = items.firstIndex(where: { $0.current.id == id }) else { return }
         items[index].undo()
         draft = items[index].current
+        projectDirty = true
         persist(index)
         scheduleNoiseAnalysisIfNeeded()
         refresh()
@@ -260,13 +402,15 @@ final class EditorModel: ObservableObject {
         guard let id = selectedID, let index = items.firstIndex(where: { $0.current.id == id }) else { return }
         items[index].redo()
         draft = items[index].current
+        projectDirty = true
         persist(index)
         scheduleNoiseAnalysisIfNeeded()
         refresh()
     }
 
     private func persist(_ index: Int) {
-        do { try store.save(items[index]); autosaveFailed = false }
+        if projectURL != nil { projectDirty = true }
+        do { if legacyRecovery { try store.save(items[index]) }; autosaveFailed = false }
         catch { autosaveFailed = true; self.error = "Autosave failed; edits remain in memory. \(error.localizedDescription)" }
     }
 
@@ -319,15 +463,7 @@ final class EditorModel: ObservableObject {
 
     func saveForClose() -> Bool {
         if gestureStart != nil { endGesture() }
-        do {
-            for history in items { try store.save(history) }
-            autosaveFailed = false
-            return true
-        } catch {
-            autosaveFailed = true
-            self.error = "Could not save edits before closing: \(error.localizedDescription)"
-            return false
-        }
+        return confirmTransition()
     }
 
     func refresh() {
